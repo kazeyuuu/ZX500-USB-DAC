@@ -1,0 +1,10 @@
+# ZX500 USB-DAC release payload checksums
+# Verify from the repository root with: shasum -a 256 -c SHA256SUMS
+88fca575027c7a093dfec268f2b6184a3835f17dd57eee1be4a9824f70f21111  ZX-DAC.apk
+faaab6e0a68052149906315de77dd71b7b3405d30fb0508a3eff92dcc1640147  blank_vbmeta.img
+40a79e235900992f1c69fba47c6418cdf5beaa17ad55efe1eee5d7409fe66d98  bridge/uac2bridge
+2c80c5943fa3bb149025e0bc891d5d73ce302813e31d547430d35522686b75be  bridge/uac2bridge-diag
+73767d92a005684e79cb184a4b43efe237ef7dda102c4073223b514b03b93e71  usb-dac.sh
+8b1e2eecfdba8e72af67adf8041d9425f508edcf2804ecb6912c2cfe20448857  usb-dac-service.sh
+cef56396f9e6ae047abc689d67afbd6c35fca259a1467191e218b59f380765b4  kernel/zx500-usb-dac.patch
+e54a37a3e114b189acba3b6bc6b51bbef3598c11a1807b26883706084fac6b76  kernel/kernel.config

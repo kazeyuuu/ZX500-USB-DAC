@@ -1,0 +1,1471 @@
+diff --git a/drivers/mxc/gpu-viv/Kbuild b/drivers/mxc/gpu-viv/Kbuild
+index 5f45b13d9..f9fd18e06 100644
+--- a/drivers/mxc/gpu-viv/Kbuild
++++ b/drivers/mxc/gpu-viv/Kbuild
+@@ -79,7 +79,7 @@ MODULE_NAME ?= galcore
+ CUSTOMER_ALLOCATOR_OBJS    ?=
+ ALLOCATOR_ARRAY_H_LOCATION ?= $(OS_KERNEL_DIR)/allocator/default/
+ 
+-EXTRA_CFLAGS += -Werror
++# Vendor driver warnings must not abort the kernel build.
+ 
+ OBJS := $(OS_KERNEL_DIR)/gc_hal_kernel_device.o \
+         $(OS_KERNEL_DIR)/gc_hal_kernel_linux.o \
+diff --git a/drivers/usb/gadget/function/f_uac2.c b/drivers/usb/gadget/function/f_uac2.c
+index d063f0401..b51d19a50 100644
+--- a/drivers/usb/gadget/function/f_uac2.c
++++ b/drivers/usb/gadget/function/f_uac2.c
+@@ -19,38 +19,46 @@
+ #include "u_uac2.h"
+ 
+ /*
+- * The driver implements a simple UAC_2 topology.
+- * USB-OUT -> IT_1 -> OT_3 -> ALSA_Capture
+- * ALSA_Playback -> IT_2 -> OT_4 -> USB-IN
+- * Capture and Playback sampling rates are independently
+- *  controlled by two clock sources :
+- *    CLK_5 := c_srate, and CLK_6 := p_srate
++ * The driver implements an output-only UAC2 topology:
++ * USB-OUT -> IT_1 -> FU_7 -> OT_3 -> ALSA capture.
+  */
+ #define USB_OUT_IT_ID	1
+-#define IO_IN_IT_ID	2
+ #define IO_OUT_OT_ID	3
+-#define USB_IN_OT_ID	4
+ #define USB_OUT_CLK_ID	5
+-#define USB_IN_CLK_ID	6
++#define MASTER_FU_ID	7	/* Feature Unit (master mute + volume) on the OUT path */
+ 
+-#define CONTROL_ABSENT	0
+-#define CONTROL_RDONLY	1
+ #define CONTROL_RDWR	3
+ 
++/* Feature Unit control bit positions in a UAC2 bmaControls u32 (2 bits each). */
++#define FU_MUTE_CTRL	0
++#define FU_VOL_CTRL	2
++
++/* Host volume exposed by the Feature Unit, signed Q8.8 dB.  The Sony hardware
++ * index is deliberately capped at 80: advertising 0 dB mapped Windows 100% to
++ * index 120, which is unsafe with sensitive headphones.  -60..-20 dB preserves
++ * 0.5 dB host control while making the protocol maximum a hearing-safe ceiling.
++ * The index is a monotonic Sony table index, not a metrologically linear dB gain. */
++#define FU_VOL_MIN	(-15360)	/* -60 dB (Q8.8) */
++#define FU_VOL_MAX	(-5120)		/* -20 dB; Sony index 80 safety ceiling */
++#define FU_VOL_RES	128		/* 0.5 dB (Q8.8) */
++
+ #define CLK_FREQ_CTRL	0
+ #define CLK_VLD_CTRL	2
+ 
+ #define COPY_CTRL	0
+-#define CONN_CTRL	2
+-#define OVRLD_CTRL	4
+-#define CLSTR_CTRL	6
+-#define UNFLW_CTRL	8
+-#define OVFLW_CTRL	10
++/* the eight discrete OUT sample rates the single Clock Source advertises via
++ * GET_RANGE and accepts via SET_CUR. The OUT endpoint is sized for the highest
++ * entry (EP_MAX_SRATE), so 48<->384 switching never changes the descriptor.
++ * Keep in sync with u_audio_rates[] (u_audio.c). */
++static const u32 c_srate_list[] = {
++	44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
++};
++#define EP_MAX_SRATE 384000
+ 
+ struct f_uac2 {
+ 	struct g_audio g_audio;
+-	u8 ac_intf, as_in_intf, as_out_intf;
+-	u8 ac_alt, as_in_alt, as_out_alt;	/* needed for get_alt() */
++	u8 ac_intf, as_out_intf;
++	u8 ac_alt, as_out_alt;	/* needed for get_alt() */
+ };
+ 
+ static inline struct f_uac2 *func_to_uac2(struct usb_function *f)
+@@ -69,34 +77,21 @@ struct f_uac2_opts *g_audio_to_uac2_opts(struct g_audio *agdev)
+ enum {
+ 	STR_ASSOC,
+ 	STR_IF_CTRL,
+-	STR_CLKSRC_IN,
+ 	STR_CLKSRC_OUT,
+ 	STR_USB_IT,
+-	STR_IO_IT,
+-	STR_USB_OT,
+ 	STR_IO_OT,
+ 	STR_AS_OUT_ALT0,
+ 	STR_AS_OUT_ALT1,
+-	STR_AS_IN_ALT0,
+-	STR_AS_IN_ALT1,
+ };
+ 
+-static char clksrc_in[8];
+-static char clksrc_out[8];
+-
+ static struct usb_string strings_fn[] = {
+-	[STR_ASSOC].s = "Source/Sink",
+-	[STR_IF_CTRL].s = "Topology Control",
+-	[STR_CLKSRC_IN].s = clksrc_in,
+-	[STR_CLKSRC_OUT].s = clksrc_out,
+-	[STR_USB_IT].s = "USBH Out",
+-	[STR_IO_IT].s = "USBD Out",
+-	[STR_USB_OT].s = "USBH In",
+-	[STR_IO_OT].s = "USBD In",
+-	[STR_AS_OUT_ALT0].s = "Playback Inactive",
+-	[STR_AS_OUT_ALT1].s = "Playback Active",
+-	[STR_AS_IN_ALT0].s = "Capture Inactive",
+-	[STR_AS_IN_ALT1].s = "Capture Active",
++	[STR_ASSOC].s = "ZX500 USB-DAC",
++	[STR_IF_CTRL].s = "ZX500 USB-DAC Control",
++	[STR_CLKSRC_OUT].s = "Internal Clock",
++	[STR_USB_IT].s = "USB Playback",
++	[STR_IO_OT].s = "ZX500 USB-DAC",
++	[STR_AS_OUT_ALT0].s = "ZX500 USB-DAC",
++	[STR_AS_OUT_ALT1].s = "ZX500 USB-DAC",
+ 	{ },
+ };
+ 
+@@ -115,7 +110,9 @@ static struct usb_interface_assoc_descriptor iad_desc = {
+ 	.bDescriptorType = USB_DT_INTERFACE_ASSOCIATION,
+ 
+ 	.bFirstInterface = 0,
+-	.bInterfaceCount = 3,
++	/* Output-only: AudioControl + AudioStreaming OUT only (was 3 with the
++	 * removed AudioStreaming IN / bogus-mic interface). */
++	.bInterfaceCount = 2,
+ 	.bFunctionClass = USB_CLASS_AUDIO,
+ 	.bFunctionSubClass = UAC2_FUNCTION_SUBCLASS_UNDEFINED,
+ 	.bFunctionProtocol = UAC_VERSION_2,
+@@ -133,18 +130,6 @@ static struct usb_interface_descriptor std_ac_if_desc = {
+ 	.bInterfaceProtocol = UAC_VERSION_2,
+ };
+ 
+-/* Clock source for IN traffic */
+-static struct uac_clock_source_descriptor in_clk_src_desc = {
+-	.bLength = sizeof in_clk_src_desc,
+-	.bDescriptorType = USB_DT_CS_INTERFACE,
+-
+-	.bDescriptorSubtype = UAC2_CLOCK_SOURCE,
+-	.bClockID = USB_IN_CLK_ID,
+-	.bmAttributes = UAC_CLOCK_SOURCE_TYPE_INT_FIXED,
+-	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL),
+-	.bAssocTerminal = 0,
+-};
+-
+ /* Clock source for OUT traffic */
+ static struct uac_clock_source_descriptor out_clk_src_desc = {
+ 	.bLength = sizeof out_clk_src_desc,
+@@ -152,8 +137,14 @@ static struct uac_clock_source_descriptor out_clk_src_desc = {
+ 
+ 	.bDescriptorSubtype = UAC2_CLOCK_SOURCE,
+ 	.bClockID = USB_OUT_CLK_ID,
+-	.bmAttributes = UAC_CLOCK_SOURCE_TYPE_INT_FIXED,
+-	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL),
++	/* programmable internal clock (not INT_FIXED) — the host may set the
++	 * rate via SET_CUR, and GET_RANGE offers multiple frequencies. INT_FIXED
++	 * with a RW Sampling Frequency Control is contradictory and can make macOS
++	 * show a single format or never send SET_CUR. */
++	.bmAttributes = UAC_CLOCK_SOURCE_TYPE_INT_PROG,
++	/* Sampling Frequency Control is read/write so the host can SET_CUR between
++	 * the discrete rates in c_srate_list. */
++	.bmControls = (CONTROL_RDWR << CLK_FREQ_CTRL),
+ 	.bAssocTerminal = 0,
+ };
+ 
+@@ -168,35 +159,38 @@ static struct uac2_input_terminal_descriptor usb_out_it_desc = {
+ 	.bAssocTerminal = 0,
+ 	.bCSourceID = USB_OUT_CLK_ID,
+ 	.iChannelNames = 0,
+-	.bmControls = cpu_to_le16(CONTROL_RDWR << COPY_CTRL),
+-};
+-
+-/* Input Terminal for I/O-In */
+-static struct uac2_input_terminal_descriptor io_in_it_desc = {
+-	.bLength = sizeof io_in_it_desc,
+-	.bDescriptorType = USB_DT_CS_INTERFACE,
+-
+-	.bDescriptorSubtype = UAC_INPUT_TERMINAL,
+-	.bTerminalID = IO_IN_IT_ID,
+-	.wTerminalType = cpu_to_le16(UAC_INPUT_TERMINAL_UNDEFINED),
+-	.bAssocTerminal = 0,
+-	.bCSourceID = USB_IN_CLK_ID,
+-	.iChannelNames = 0,
+-	.bmControls = cpu_to_le16(CONTROL_RDWR << COPY_CTRL),
++	/* No Terminal controls are implemented; do not advertise Copy Protect RW. */
++	.bmControls = 0,
+ };
+ 
+-/* Ouput Terminal for USB_IN */
+-static struct uac2_output_terminal_descriptor usb_in_ot_desc = {
+-	.bLength = sizeof usb_in_ot_desc,
++/* Feature Unit (Master Mute + Master Volume) between USB_OUT input terminal
++ * and the I/O output terminal. UAC2 bmaControls entries are u32, one per channel
++ * plus a leading master entry; the stream is stereo, so [0]=master, [1]=L, [2]=R
++ * (controls only on master). Concrete layout (no bControlSize in UAC2; iFeature
++ * follows bmaControls). bLength = 5 + 3*4 + 1 = 18. */
++struct uac2_feature_unit_desc_2ch {
++	__u8 bLength;
++	__u8 bDescriptorType;
++	__u8 bDescriptorSubtype;
++	__u8 bUnitID;
++	__u8 bSourceID;
++	__le32 bmaControls[3];
++	__u8 iFeature;
++} __attribute__((packed));
++
++static struct uac2_feature_unit_desc_2ch master_fu_desc = {
++	.bLength = sizeof master_fu_desc,
+ 	.bDescriptorType = USB_DT_CS_INTERFACE,
+-
+-	.bDescriptorSubtype = UAC_OUTPUT_TERMINAL,
+-	.bTerminalID = USB_IN_OT_ID,
+-	.wTerminalType = cpu_to_le16(UAC_TERMINAL_STREAMING),
+-	.bAssocTerminal = 0,
+-	.bSourceID = IO_IN_IT_ID,
+-	.bCSourceID = USB_IN_CLK_ID,
+-	.bmControls = cpu_to_le16(CONTROL_RDWR << COPY_CTRL),
++	.bDescriptorSubtype = UAC_FEATURE_UNIT,
++	.bUnitID = MASTER_FU_ID,
++	.bSourceID = USB_OUT_IT_ID,
++	.bmaControls = {
++		cpu_to_le32((CONTROL_RDWR << FU_MUTE_CTRL) |
++			    (CONTROL_RDWR << FU_VOL_CTRL)),	/* master */
++		0,						/* left */
++		0,						/* right */
++	},
++	.iFeature = 0,
+ };
+ 
+ /* Ouput Terminal for I/O-Out */
+@@ -206,11 +200,13 @@ static struct uac2_output_terminal_descriptor io_out_ot_desc = {
+ 
+ 	.bDescriptorSubtype = UAC_OUTPUT_TERMINAL,
+ 	.bTerminalID = IO_OUT_OT_ID,
+-	.wTerminalType = cpu_to_le16(UAC_OUTPUT_TERMINAL_UNDEFINED),
++	.wTerminalType = cpu_to_le16(UAC_OUTPUT_TERMINAL_SPEAKER),
+ 	.bAssocTerminal = 0,
+-	.bSourceID = USB_OUT_IT_ID,
++	/* sourced from the Feature Unit (USB_OUT_IT -> FU -> IO_OUT_OT). */
++	.bSourceID = MASTER_FU_ID,
+ 	.bCSourceID = USB_OUT_CLK_ID,
+-	.bmControls = cpu_to_le16(CONTROL_RDWR << COPY_CTRL),
++	/* No Terminal controls are implemented; do not advertise Copy Protect RW. */
++	.bmControls = 0,
+ };
+ 
+ static struct uac2_ac_header_descriptor ac_hdr_desc = {
+@@ -220,9 +216,12 @@ static struct uac2_ac_header_descriptor ac_hdr_desc = {
+ 	.bDescriptorSubtype = UAC_MS_HEADER,
+ 	.bcdADC = cpu_to_le16(0x200),
+ 	.bCategory = UAC2_FUNCTION_IO_BOX,
+-	.wTotalLength = cpu_to_le16(sizeof in_clk_src_desc
+-			+ sizeof out_clk_src_desc + sizeof usb_out_it_desc
+-			+ sizeof io_in_it_desc + sizeof usb_in_ot_desc
++	/* Total length of the class-specific AudioControl interface descriptors,
++	 * including this header (UAC2 section 4.7). */
++	.wTotalLength = cpu_to_le16(sizeof ac_hdr_desc
++			+ sizeof out_clk_src_desc
++			+ sizeof usb_out_it_desc
++			+ sizeof master_fu_desc
+ 			+ sizeof io_out_ot_desc),
+ 	.bmControls = 0,
+ };
+@@ -245,7 +244,7 @@ static struct usb_interface_descriptor std_as_out_if1_desc = {
+ 	.bDescriptorType = USB_DT_INTERFACE,
+ 
+ 	.bAlternateSetting = 1,
+-	.bNumEndpoints = 1,
++	.bNumEndpoints = 1,	/* adaptive data OUT endpoint */
+ 	.bInterfaceClass = USB_CLASS_AUDIO,
+ 	.bInterfaceSubClass = USB_SUBCLASS_AUDIOSTREAMING,
+ 	.bInterfaceProtocol = UAC_VERSION_2,
+@@ -278,7 +277,8 @@ static struct usb_endpoint_descriptor fs_epout_desc = {
+ 	.bDescriptorType = USB_DT_ENDPOINT,
+ 
+ 	.bEndpointAddress = USB_DIR_OUT,
+-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
++	/* adaptive sink; clock-domain differences are handled by the bridge. */
++	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ADAPTIVE,
+ 	.wMaxPacketSize = cpu_to_le16(1023),
+ 	.bInterval = 1,
+ };
+@@ -287,9 +287,13 @@ static struct usb_endpoint_descriptor hs_epout_desc = {
+ 	.bLength = USB_DT_ENDPOINT_SIZE,
+ 	.bDescriptorType = USB_DT_ENDPOINT,
+ 
+-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
++	/* adaptive sink -- see fs_epout_desc. */
++	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ADAPTIVE,
+ 	.wMaxPacketSize = cpu_to_le16(1024),
+-	.bInterval = 4,
++	/* 125us service interval. At 384k the payload is (48+1)*6 = 294B,
++	 * a plain single-transaction packet. u_audio sizes RX requests from this
++	 * active-speed descriptor so the controller never sees an oversized request. */
++	.bInterval = 1,
+ };
+ 
+ /* CS AS ISO OUT Endpoint */
+@@ -304,93 +308,25 @@ static struct uac2_iso_endpoint_descriptor as_iso_out_desc = {
+ 	.wLockDelay = 0,
+ };
+ 
+-/* Audio Streaming IN Interface - Alt0 */
+-static struct usb_interface_descriptor std_as_in_if0_desc = {
+-	.bLength = sizeof std_as_in_if0_desc,
+-	.bDescriptorType = USB_DT_INTERFACE,
+-
+-	.bAlternateSetting = 0,
+-	.bNumEndpoints = 0,
+-	.bInterfaceClass = USB_CLASS_AUDIO,
+-	.bInterfaceSubClass = USB_SUBCLASS_AUDIOSTREAMING,
+-	.bInterfaceProtocol = UAC_VERSION_2,
+-};
+-
+-/* Audio Streaming IN Interface - Alt1 */
+-static struct usb_interface_descriptor std_as_in_if1_desc = {
+-	.bLength = sizeof std_as_in_if1_desc,
+-	.bDescriptorType = USB_DT_INTERFACE,
+-
+-	.bAlternateSetting = 1,
+-	.bNumEndpoints = 1,
+-	.bInterfaceClass = USB_CLASS_AUDIO,
+-	.bInterfaceSubClass = USB_SUBCLASS_AUDIOSTREAMING,
+-	.bInterfaceProtocol = UAC_VERSION_2,
+-};
+-
+-/* Audio Stream IN Intface Desc */
+-static struct uac2_as_header_descriptor as_in_hdr_desc = {
+-	.bLength = sizeof as_in_hdr_desc,
+-	.bDescriptorType = USB_DT_CS_INTERFACE,
+-
+-	.bDescriptorSubtype = UAC_AS_GENERAL,
+-	.bTerminalLink = USB_IN_OT_ID,
+-	.bmControls = 0,
+-	.bFormatType = UAC_FORMAT_TYPE_I,
+-	.bmFormats = cpu_to_le32(UAC_FORMAT_TYPE_I_PCM),
+-	.iChannelNames = 0,
+-};
+-
+-/* Audio USB_IN Format */
+-static struct uac2_format_type_i_descriptor as_in_fmt1_desc = {
+-	.bLength = sizeof as_in_fmt1_desc,
+-	.bDescriptorType = USB_DT_CS_INTERFACE,
+-	.bDescriptorSubtype = UAC_FORMAT_TYPE,
+-	.bFormatType = UAC_FORMAT_TYPE_I,
+-};
+-
+-/* STD AS ISO IN Endpoint */
+-static struct usb_endpoint_descriptor fs_epin_desc = {
+-	.bLength = USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType = USB_DT_ENDPOINT,
+-
+-	.bEndpointAddress = USB_DIR_IN,
+-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
+-	.wMaxPacketSize = cpu_to_le16(1023),
+-	.bInterval = 1,
+-};
+-
+-static struct usb_endpoint_descriptor hs_epin_desc = {
+-	.bLength = USB_DT_ENDPOINT_SIZE,
+-	.bDescriptorType = USB_DT_ENDPOINT,
+-
+-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
+-	.wMaxPacketSize = cpu_to_le16(1024),
+-	.bInterval = 4,
+-};
+-
+-/* CS AS ISO IN Endpoint */
+-static struct uac2_iso_endpoint_descriptor as_iso_in_desc = {
+-	.bLength = sizeof as_iso_in_desc,
+-	.bDescriptorType = USB_DT_CS_ENDPOINT,
+-
+-	.bDescriptorSubtype = UAC_EP_GENERAL,
+-	.bmAttributes = 0,
+-	.bmControls = 0,
+-	.bLockDelayUnits = 0,
+-	.wLockDelay = 0,
+-};
++/* Decoded payload capacity in bytes = base(bits10:0) * mult(bits12:11 + 1).
++ * The raw le16 wMaxPacketSize is NOT a byte count once mult bits are set
++ * (384k -> 770|(2<<11)=4866, real capacity 770*3=2310); using the raw value as a
++ * request length makes ci_hdrc reject it (-EMSGSIZE: req.length <= mult*maxpacket). */
++static u16 ep_payload_capacity(const struct usb_endpoint_descriptor *desc)
++{
++	return usb_endpoint_maxp(desc) * usb_endpoint_maxp_mult(desc);
++}
+ 
++/* Output-only adaptive sink: AudioControl (OUT clock + OUT terminals only)
++ * plus one AudioStreaming OUT interface and one data OUT endpoint. */
+ static struct usb_descriptor_header *fs_audio_desc[] = {
+ 	(struct usb_descriptor_header *)&iad_desc,
+ 	(struct usb_descriptor_header *)&std_ac_if_desc,
+ 
+ 	(struct usb_descriptor_header *)&ac_hdr_desc,
+-	(struct usb_descriptor_header *)&in_clk_src_desc,
+ 	(struct usb_descriptor_header *)&out_clk_src_desc,
+ 	(struct usb_descriptor_header *)&usb_out_it_desc,
+-	(struct usb_descriptor_header *)&io_in_it_desc,
+-	(struct usb_descriptor_header *)&usb_in_ot_desc,
++	(struct usb_descriptor_header *)&master_fu_desc,
+ 	(struct usb_descriptor_header *)&io_out_ot_desc,
+ 
+ 	(struct usb_descriptor_header *)&std_as_out_if0_desc,
+@@ -400,14 +336,6 @@ static struct usb_descriptor_header *fs_audio_desc[] = {
+ 	(struct usb_descriptor_header *)&as_out_fmt1_desc,
+ 	(struct usb_descriptor_header *)&fs_epout_desc,
+ 	(struct usb_descriptor_header *)&as_iso_out_desc,
+-
+-	(struct usb_descriptor_header *)&std_as_in_if0_desc,
+-	(struct usb_descriptor_header *)&std_as_in_if1_desc,
+-
+-	(struct usb_descriptor_header *)&as_in_hdr_desc,
+-	(struct usb_descriptor_header *)&as_in_fmt1_desc,
+-	(struct usb_descriptor_header *)&fs_epin_desc,
+-	(struct usb_descriptor_header *)&as_iso_in_desc,
+ 	NULL,
+ };
+ 
+@@ -416,11 +344,9 @@ static struct usb_descriptor_header *hs_audio_desc[] = {
+ 	(struct usb_descriptor_header *)&std_ac_if_desc,
+ 
+ 	(struct usb_descriptor_header *)&ac_hdr_desc,
+-	(struct usb_descriptor_header *)&in_clk_src_desc,
+ 	(struct usb_descriptor_header *)&out_clk_src_desc,
+ 	(struct usb_descriptor_header *)&usb_out_it_desc,
+-	(struct usb_descriptor_header *)&io_in_it_desc,
+-	(struct usb_descriptor_header *)&usb_in_ot_desc,
++	(struct usb_descriptor_header *)&master_fu_desc,
+ 	(struct usb_descriptor_header *)&io_out_ot_desc,
+ 
+ 	(struct usb_descriptor_header *)&std_as_out_if0_desc,
+@@ -430,14 +356,6 @@ static struct usb_descriptor_header *hs_audio_desc[] = {
+ 	(struct usb_descriptor_header *)&as_out_fmt1_desc,
+ 	(struct usb_descriptor_header *)&hs_epout_desc,
+ 	(struct usb_descriptor_header *)&as_iso_out_desc,
+-
+-	(struct usb_descriptor_header *)&std_as_in_if0_desc,
+-	(struct usb_descriptor_header *)&std_as_in_if1_desc,
+-
+-	(struct usb_descriptor_header *)&as_in_hdr_desc,
+-	(struct usb_descriptor_header *)&as_in_fmt1_desc,
+-	(struct usb_descriptor_header *)&hs_epin_desc,
+-	(struct usb_descriptor_header *)&as_iso_in_desc,
+ 	NULL,
+ };
+ 
+@@ -445,6 +363,17 @@ struct cntrl_cur_lay3 {
+ 	__le32	dCUR;
+ };
+ 
++/* layout-2 (2-byte) CUR/RANGE for the Feature Unit Volume Control. */
++struct cntrl_cur_lay2 {
++	__le16	wCUR;
++};
++struct cntrl_range_lay2 {
++	__le16	wNumSubRanges;
++	__le16	wMIN;
++	__le16	wMAX;
++	__le16	wRES;
++} __packed;
++
+ struct cntrl_range_lay3 {
+ 	__le16	wNumSubRanges;
+ 	__le32	dMIN;
+@@ -452,27 +381,46 @@ struct cntrl_range_lay3 {
+ 	__le32	dRES;
+ } __packed;
+ 
++/* Sampling Frequency GET_RANGE with one discrete subrange per supported rate
++ * (MIN=MAX=rate, RES=0). wNumSubRanges + ARRAY_SIZE(c_srate_list) triplets. */
++struct cntrl_ranges_lay3_srate {
++	__le16	wNumSubRanges;
++	struct {
++		__le32	dMIN;
++		__le32	dMAX;
++		__le32	dRES;
++	} __packed sub[ARRAY_SIZE(c_srate_list)];
++} __packed;
++
+ static void set_ep_max_packet_size(const struct f_uac2_opts *uac2_opts,
+ 	struct usb_endpoint_descriptor *ep_desc,
+-	unsigned int factor, bool is_playback)
++	unsigned int factor, u16 max_size_ep, unsigned int srate_override)
+ {
+-	int chmask, srate, ssize;
++	int chmask = uac2_opts->c_chmask;
++	int srate = uac2_opts->c_srate;
++	int ssize = uac2_opts->c_ssize;
+ 	u16 max_packet_size;
+ 
+-	if (is_playback) {
+-		chmask = uac2_opts->p_chmask;
+-		srate = uac2_opts->p_srate;
+-		ssize = uac2_opts->p_ssize;
+-	} else {
+-		chmask = uac2_opts->c_chmask;
+-		srate = uac2_opts->c_srate;
+-		ssize = uac2_opts->c_ssize;
+-	}
++	/* size the endpoint for a fixed rate (the highest supported), not the
++	 * configfs/initial rate, so switching rates via SET_CUR never needs a new
++	 * descriptor. 0 keeps the configfs rate (unused now; kept for generality). */
++	if (srate_override)
++		srate = srate_override;
+ 
++	/* Reserve one extra audio frame per service interval. This lets the
++	 * adaptive endpoint accept the fractional packet-length pattern required
++	 * by rates that are not integral multiples of the service cadence. */
+ 	max_packet_size = num_channels(chmask) * ssize *
+-		DIV_ROUND_UP(srate, factor / (1 << (ep_desc->bInterval - 1)));
++		((srate / (factor / (1 << (ep_desc->bInterval - 1)))) + 1);
++	/* clamp against the PROTOCOL ceiling passed by the caller,
++	 * never against ep_desc->wMaxPacketSize itself. ep_desc is a global
++	 * static; usb_assign_descriptors() only copies it and afunc_unbind()
++	 * never restores it, so min()-ing against itself made wMaxPacketSize
++	 * shrink monotonically across rebinds and never recover (a first bind
++	 * at 48k locked the ceiling to 294B, making every later >48k rebind
++	 * advertise a too-small packet -> host rejects the AS altsetting). */
+ 	ep_desc->wMaxPacketSize = cpu_to_le16(min_t(u16, max_packet_size,
+-				le16_to_cpu(ep_desc->wMaxPacketSize)));
++				max_size_ep));
+ }
+ 
+ static int
+@@ -494,34 +442,20 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
+ 		return PTR_ERR(us);
+ 	iad_desc.iFunction = us[STR_ASSOC].id;
+ 	std_ac_if_desc.iInterface = us[STR_IF_CTRL].id;
+-	in_clk_src_desc.iClockSource = us[STR_CLKSRC_IN].id;
+ 	out_clk_src_desc.iClockSource = us[STR_CLKSRC_OUT].id;
+ 	usb_out_it_desc.iTerminal = us[STR_USB_IT].id;
+-	io_in_it_desc.iTerminal = us[STR_IO_IT].id;
+-	usb_in_ot_desc.iTerminal = us[STR_USB_OT].id;
+ 	io_out_ot_desc.iTerminal = us[STR_IO_OT].id;
+ 	std_as_out_if0_desc.iInterface = us[STR_AS_OUT_ALT0].id;
+ 	std_as_out_if1_desc.iInterface = us[STR_AS_OUT_ALT1].id;
+-	std_as_in_if0_desc.iInterface = us[STR_AS_IN_ALT0].id;
+-	std_as_in_if1_desc.iInterface = us[STR_AS_IN_ALT1].id;
+ 
+ 
+ 	/* Initialize the configurable parameters */
+ 	usb_out_it_desc.bNrChannels = num_channels(uac2_opts->c_chmask);
+ 	usb_out_it_desc.bmChannelConfig = cpu_to_le32(uac2_opts->c_chmask);
+-	io_in_it_desc.bNrChannels = num_channels(uac2_opts->p_chmask);
+-	io_in_it_desc.bmChannelConfig = cpu_to_le32(uac2_opts->p_chmask);
+ 	as_out_hdr_desc.bNrChannels = num_channels(uac2_opts->c_chmask);
+ 	as_out_hdr_desc.bmChannelConfig = cpu_to_le32(uac2_opts->c_chmask);
+-	as_in_hdr_desc.bNrChannels = num_channels(uac2_opts->p_chmask);
+-	as_in_hdr_desc.bmChannelConfig = cpu_to_le32(uac2_opts->p_chmask);
+ 	as_out_fmt1_desc.bSubslotSize = uac2_opts->c_ssize;
+ 	as_out_fmt1_desc.bBitResolution = uac2_opts->c_ssize * 8;
+-	as_in_fmt1_desc.bSubslotSize = uac2_opts->p_ssize;
+-	as_in_fmt1_desc.bBitResolution = uac2_opts->p_ssize * 8;
+-
+-	snprintf(clksrc_in, sizeof(clksrc_in), "%uHz", uac2_opts->p_srate);
+-	snprintf(clksrc_out, sizeof(clksrc_out), "%uHz", uac2_opts->c_srate);
+ 
+ 	ret = usb_interface_id(cfg, fn);
+ 	if (ret < 0) {
+@@ -544,43 +478,25 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
+ 	uac2->as_out_intf = ret;
+ 	uac2->as_out_alt = 0;
+ 
+-	ret = usb_interface_id(cfg, fn);
+-	if (ret < 0) {
+-		dev_err(dev, "%s:%d Error!\n", __func__, __LINE__);
+-		return ret;
+-	}
+-	std_as_in_if0_desc.bInterfaceNumber = ret;
+-	std_as_in_if1_desc.bInterfaceNumber = ret;
+-	uac2->as_in_intf = ret;
+-	uac2->as_in_alt = 0;
+-
+-	/* Calculate wMaxPacketSize according to audio bandwidth */
+-	set_ep_max_packet_size(uac2_opts, &fs_epin_desc, 1000, true);
+-	set_ep_max_packet_size(uac2_opts, &fs_epout_desc, 1000, false);
+-	set_ep_max_packet_size(uac2_opts, &hs_epin_desc, 8000, true);
+-	set_ep_max_packet_size(uac2_opts, &hs_epout_desc, 8000, false);
++	/* Size the single OUT data endpoint for the highest supported rate so
++	 * switching between any of the eight rates never needs a new descriptor. */
++	set_ep_max_packet_size(uac2_opts, &fs_epout_desc, 1000, 1023, EP_MAX_SRATE);
++	set_ep_max_packet_size(uac2_opts, &hs_epout_desc, 8000, 1024, EP_MAX_SRATE);
+ 
+ 	agdev->out_ep = usb_ep_autoconfig(gadget, &fs_epout_desc);
+ 	if (!agdev->out_ep) {
+ 		dev_err(dev, "%s:%d Error!\n", __func__, __LINE__);
+ 		return -ENODEV;
+ 	}
+-
+-	agdev->in_ep = usb_ep_autoconfig(gadget, &fs_epin_desc);
+-	if (!agdev->in_ep) {
+-		dev_err(dev, "%s:%d Error!\n", __func__, __LINE__);
+-		return -ENODEV;
+-	}
+-
+-	agdev->in_ep_maxpsize = max_t(u16,
+-				le16_to_cpu(fs_epin_desc.wMaxPacketSize),
+-				le16_to_cpu(hs_epin_desc.wMaxPacketSize));
++	/* Output-only: no mic data IN endpoint. */
++	agdev->in_ep = NULL;
++	agdev->in_ep_maxpsize = 0;
++	/* Decode the descriptor rather than treating the encoded le16 as bytes. */
+ 	agdev->out_ep_maxpsize = max_t(u16,
+-				le16_to_cpu(fs_epout_desc.wMaxPacketSize),
+-				le16_to_cpu(hs_epout_desc.wMaxPacketSize));
++				ep_payload_capacity(&fs_epout_desc),
++				ep_payload_capacity(&hs_epout_desc));
+ 
+ 	hs_epout_desc.bEndpointAddress = fs_epout_desc.bEndpointAddress;
+-	hs_epin_desc.bEndpointAddress = fs_epin_desc.bEndpointAddress;
+ 
+ 	ret = usb_assign_descriptors(fn, fs_audio_desc, hs_audio_desc, NULL,
+ 				     NULL);
+@@ -589,9 +505,12 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
+ 
+ 	agdev->gadget = gadget;
+ 
+-	agdev->params.p_chmask = uac2_opts->p_chmask;
+-	agdev->params.p_srate = uac2_opts->p_srate;
+-	agdev->params.p_ssize = uac2_opts->p_ssize;
++	/* Output-only: force the playback (device->host) path off regardless of
++	 * the configfs p_* values, so g_audio_setup() creates a capture-only card
++	 * (0 playback substreams, 1 capture substream) and never opens an IN path. */
++	agdev->params.p_chmask = 0;
++	agdev->params.p_srate = 0;
++	agdev->params.p_ssize = 0;
+ 	agdev->params.c_chmask = uac2_opts->c_chmask;
+ 	agdev->params.c_srate = uac2_opts->c_srate;
+ 	agdev->params.c_ssize = uac2_opts->c_ssize;
+@@ -599,6 +518,17 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
+ 	ret = g_audio_setup(agdev, "UAC2 PCM", "UAC2_Gadget");
+ 	if (ret)
+ 		goto err_free_descs;
++
++	/* initialize the running rate to 48000 (the single authoritative value in
++	 * u_audio srate_active; the host may switch it via SET_CUR). */
++	u_audio_set_capture_srate(agdev, 48000);
++
++	/* Seed from configfs, but never publish a value above the Feature Unit safety
++	 * ceiling.  This also makes an older launcher that snapshots hardware index
++	 * 81..120 fail safe: the bridge will immediately bring it back to index 80. */
++	u_audio_set_host_volume(agdev,
++		clamp_t(s32, uac2_opts->c_volume, FU_VOL_MIN, FU_VOL_MAX));
++	u_audio_set_host_mute(agdev, uac2_opts->c_mute);
+ 	return 0;
+ 
+ err_free_descs:
+@@ -638,14 +568,8 @@ afunc_set_alt(struct usb_function *fn, unsigned intf, unsigned alt)
+ 			ret = u_audio_start_capture(&uac2->g_audio);
+ 		else
+ 			u_audio_stop_capture(&uac2->g_audio);
+-	} else if (intf == uac2->as_in_intf) {
+-		uac2->as_in_alt = alt;
+-
+-		if (alt)
+-			ret = u_audio_start_playback(&uac2->g_audio);
+-		else
+-			u_audio_stop_playback(&uac2->g_audio);
+ 	} else {
++		/* Output-only: no AudioStreaming IN interface. */
+ 		dev_err(dev, "%s:%d Error!\n", __func__, __LINE__);
+ 		return -EINVAL;
+ 	}
+@@ -663,9 +587,8 @@ afunc_get_alt(struct usb_function *fn, unsigned intf)
+ 		return uac2->ac_alt;
+ 	else if (intf == uac2->as_out_intf)
+ 		return uac2->as_out_alt;
+-	else if (intf == uac2->as_in_intf)
+-		return uac2->as_in_alt;
+ 	else
++		/* Output-only: no AudioStreaming IN interface. */
+ 		dev_err(&agdev->gadget->dev,
+ 			"%s:%d Invalid Interface %d!\n",
+ 			__func__, __LINE__, intf);
+@@ -678,10 +601,9 @@ afunc_disable(struct usb_function *fn)
+ {
+ 	struct f_uac2 *uac2 = func_to_uac2(fn);
+ 
+-	uac2->as_in_alt = 0;
++	/* Output-only: only the capture (host->device OUT) path exists. */
+ 	uac2->as_out_alt = 0;
+ 	u_audio_stop_capture(&uac2->g_audio);
+-	u_audio_stop_playback(&uac2->g_audio);
+ }
+ 
+ static int
+@@ -696,24 +618,45 @@ in_rq_cur(struct usb_function *fn, const struct usb_ctrlrequest *cr)
+ 	u8 entity_id = (w_index >> 8) & 0xff;
+ 	u8 control_selector = w_value >> 8;
+ 	int value = -EOPNOTSUPP;
+-	int p_srate, c_srate;
++	int c_srate;
+ 
+ 	opts = g_audio_to_uac2_opts(agdev);
+-	p_srate = opts->p_srate;
+-	c_srate = opts->c_srate;
++	(void)opts;
++	/* report the running rate the host selected via SET_CUR, not configfs.
++	 * srate_active in u_audio is the single authoritative source shared by
++	 * GET_CUR, the SET_CUR setter, Current Rate, and the userspace bridge. */
++	c_srate = u_audio_get_capture_srate(agdev);
++
++	/* Feature Unit master mute/volume GET_CUR (host reads current values). */
++	if (entity_id == MASTER_FU_ID) {
++		if (control_selector == UAC_FU_MUTE) {
++			*(u8 *)req->buf = u_audio_get_host_mute(agdev) ? 1 : 0;
++			return min_t(unsigned, w_length, 1);
++		} else if (control_selector == UAC_FU_VOLUME) {
++			struct cntrl_cur_lay2 c;
++			c.wCUR = cpu_to_le16((u16)(s16)u_audio_get_host_volume(agdev));
++			value = min_t(unsigned, w_length, sizeof c);
++			memcpy(req->buf, &c, value);
++			return value;
++		}
++		return -EOPNOTSUPP;
++	}
+ 
++	/* Output-only: only the OUT clock exists; USB_IN_CLK_ID is not in the
++	 * descriptors, so any request for it is unsupported. */
+ 	if (control_selector == UAC2_CS_CONTROL_SAM_FREQ) {
+ 		struct cntrl_cur_lay3 c;
+ 		memset(&c, 0, sizeof(struct cntrl_cur_lay3));
+ 
+-		if (entity_id == USB_IN_CLK_ID)
+-			c.dCUR = cpu_to_le32(p_srate);
+-		else if (entity_id == USB_OUT_CLK_ID)
+-			c.dCUR = cpu_to_le32(c_srate);
++		if (entity_id != USB_OUT_CLK_ID)
++			return -EOPNOTSUPP;
++		c.dCUR = cpu_to_le32(c_srate);
+ 
+ 		value = min_t(unsigned, w_length, sizeof c);
+ 		memcpy(req->buf, &c, value);
+ 	} else if (control_selector == UAC2_CS_CONTROL_CLOCK_VALID) {
++		if (entity_id != USB_OUT_CLK_ID)
++			return -EOPNOTSUPP;
+ 		*(u8 *)req->buf = 1;
+ 		value = min_t(unsigned, w_length, 1);
+ 	} else {
+@@ -736,28 +679,43 @@ in_rq_range(struct usb_function *fn, const struct usb_ctrlrequest *cr)
+ 	u16 w_value = le16_to_cpu(cr->wValue);
+ 	u8 entity_id = (w_index >> 8) & 0xff;
+ 	u8 control_selector = w_value >> 8;
+-	struct cntrl_range_lay3 r;
++	struct cntrl_ranges_lay3_srate rs;
+ 	int value = -EOPNOTSUPP;
+-	int p_srate, c_srate;
++	unsigned int i;
+ 
+ 	opts = g_audio_to_uac2_opts(agdev);
+-	p_srate = opts->p_srate;
+-	c_srate = opts->c_srate;
++	(void)opts;
++
++	/* Feature Unit Volume GET_RANGE (one subrange, MIN/MAX/RES in Q8.8 dB). */
++	if (entity_id == MASTER_FU_ID) {
++		if (control_selector == UAC_FU_VOLUME) {
++			struct cntrl_range_lay2 r;
++			r.wNumSubRanges = cpu_to_le16(1);
++			r.wMIN = cpu_to_le16((u16)(s16)FU_VOL_MIN);
++			r.wMAX = cpu_to_le16((u16)(s16)FU_VOL_MAX);
++			r.wRES = cpu_to_le16((u16)(s16)FU_VOL_RES);
++			value = min_t(unsigned, w_length, sizeof r);
++			memcpy(req->buf, &r, value);
++			return value;
++		}
++		return -EOPNOTSUPP;
++	}
+ 
++	/* Output-only: only the OUT clock exists; report one discrete subrange
++	 * per supported rate (MIN=MAX=rate, RES=0). */
+ 	if (control_selector == UAC2_CS_CONTROL_SAM_FREQ) {
+-		if (entity_id == USB_IN_CLK_ID)
+-			r.dMIN = cpu_to_le32(p_srate);
+-		else if (entity_id == USB_OUT_CLK_ID)
+-			r.dMIN = cpu_to_le32(c_srate);
+-		else
++		if (entity_id != USB_OUT_CLK_ID)
+ 			return -EOPNOTSUPP;
+ 
+-		r.dMAX = r.dMIN;
+-		r.dRES = 0;
+-		r.wNumSubRanges = cpu_to_le16(1);
++		rs.wNumSubRanges = cpu_to_le16(ARRAY_SIZE(c_srate_list));
++		for (i = 0; i < ARRAY_SIZE(c_srate_list); i++) {
++			rs.sub[i].dMIN = cpu_to_le32(c_srate_list[i]);
++			rs.sub[i].dMAX = cpu_to_le32(c_srate_list[i]);
++			rs.sub[i].dRES = 0;
++		}
+ 
+-		value = min_t(unsigned, w_length, sizeof r);
+-		memcpy(req->buf, &r, value);
++		value = min_t(unsigned, w_length, sizeof rs);
++		memcpy(req->buf, &rs, value);
+ 	} else {
+ 		dev_err(&agdev->gadget->dev,
+ 			"%s:%d control_selector=%d TODO!\n",
+@@ -778,15 +736,106 @@ ac_rq_in(struct usb_function *fn, const struct usb_ctrlrequest *cr)
+ 		return -EOPNOTSUPP;
+ }
+ 
++/* SET_CUR data-stage completion. The 4-byte OUT payload (LE32 sample rate)
++ * arrives here after out_rq_cur() accepted the transfer. composite_setup() resets
++ * ep0->driver_data and req->complete on every setup, so this only fires for the
++ * SET_CUR we armed. */
++static void uac2_cs_control_sam_freq(struct usb_ep *ep, struct usb_request *req)
++{
++	struct usb_function *fn = ep->driver_data;
++	struct g_audio *agdev;
++	u32 val;
++	unsigned int i;
++
++	if (!fn || req->status || req->actual != 4)
++		return;
++
++	agdev = func_to_g_audio(fn);
++	val = le32_to_cpu(*(__le32 *)req->buf);
++
++	/* Apply a valid SET_CUR regardless of the current AS alternate setting.
++	 * Windows may issue Clock SET_CUR while Alt1 is still selected; silently
++	 * ignoring that request leaves the host sending the new rate while ALSA and
++	 * the bridge remain at the old one.  the userspace bridge observes Current Rate and
++	 * closes/reopens both PCM sides, so the live transition is handled in userspace.
++	 * macOS normally sends the same request at Alt0 and is unchanged. */
++	for (i = 0; i < ARRAY_SIZE(c_srate_list); i++) {
++		if (val == c_srate_list[i]) {
++			u_audio_set_capture_srate(agdev, val);
++			return;
++		}
++	}
++}
++
++/* Feature Unit SET_CUR completions. Unlike the sample-rate SET_CUR, volume and
++ * mute apply mid-playback (no Alt0 guard) -- they only update shared state that
++ * the userspace bridge reads and pushes to the card1 mixer. */
++static void uac2_cs_fu_mute(struct usb_ep *ep, struct usb_request *req)
++{
++	struct usb_function *fn = ep->driver_data;
++
++	if (!fn || req->status || req->actual != 1)
++		return;
++	u_audio_set_host_mute(func_to_g_audio(fn), *(u8 *)req->buf ? 1 : 0);
++}
++
++static void uac2_cs_fu_volume(struct usb_ep *ep, struct usb_request *req)
++{
++	struct usb_function *fn = ep->driver_data;
++	s16 v;
++
++	if (!fn || req->status || req->actual != 2)
++		return;
++	v = (s16)le16_to_cpu(*(__le16 *)req->buf);
++	if (v < FU_VOL_MIN)
++		v = FU_VOL_MIN;
++	if (v > FU_VOL_MAX)
++		v = FU_VOL_MAX;
++	/* Quantize to the RES grid so the published value is always a clean multiple of
++	 * FU_VOL_RES off FU_VOL_MIN. The bridge validates this and rejects off-grid reads
++	 * (a corrupt/failed read can then never masquerade as a valid loud target). */
++	v = FU_VOL_MIN + ((v - FU_VOL_MIN) / FU_VOL_RES) * FU_VOL_RES;
++	u_audio_set_host_volume(func_to_g_audio(fn), v);
++}
++
+ static int
+ out_rq_cur(struct usb_function *fn, const struct usb_ctrlrequest *cr)
+ {
++	struct usb_composite_dev *cdev = fn->config->cdev;
++	struct usb_request *req = cdev->req;
+ 	u16 w_length = le16_to_cpu(cr->wLength);
++	u16 w_index = le16_to_cpu(cr->wIndex);
+ 	u16 w_value = le16_to_cpu(cr->wValue);
++	u8 entity_id = (w_index >> 8) & 0xff;
+ 	u8 control_selector = w_value >> 8;
+ 
+-	if (control_selector == UAC2_CS_CONTROL_SAM_FREQ)
++	/* NOTE: dispatch on entity_id FIRST -- the FU Mute selector (UAC_FU_MUTE=0x01)
++	 * and the Clock SAM_FREQ selector (UAC2_CS_CONTROL_SAM_FREQ=0x01) share the same
++	 * value, so keying on control_selector alone would route FU mute to the clock. */
++	if (entity_id == USB_OUT_CLK_ID &&
++	    control_selector == UAC2_CS_CONTROL_SAM_FREQ) {
++		/* Only the OUT clock, strictly a 4-byte payload. */
++		if (w_length != 4)
++			return -EINVAL;
++		/* Arm the OUT data-stage completion to parse the value. */
++		cdev->gadget->ep0->driver_data = fn;
++		req->complete = uac2_cs_control_sam_freq;
+ 		return w_length;
++	}
++
++	/* Feature Unit mute (1 byte) / volume (2 byte) SET_CUR. No Alt0 guard. */
++	if (entity_id == MASTER_FU_ID) {
++		if (control_selector == UAC_FU_MUTE && w_length == 1) {
++			cdev->gadget->ep0->driver_data = fn;
++			req->complete = uac2_cs_fu_mute;
++			return w_length;
++		} else if (control_selector == UAC_FU_VOLUME && w_length == 2) {
++			cdev->gadget->ep0->driver_data = fn;
++			req->complete = uac2_cs_fu_volume;
++			return w_length;
++		}
++		return -EINVAL;
++	}
+ 
+ 	return -EOPNOTSUPP;
+ }
+@@ -904,22 +953,62 @@ end:									\
+ 									\
+ CONFIGFS_ATTR(f_uac2_opts_, name)
+ 
+-UAC2_ATTRIBUTE(p_chmask);
+-UAC2_ATTRIBUTE(p_srate);
+-UAC2_ATTRIBUTE(p_ssize);
++/* signed variant for c_volume (Q8.8 dB can be negative). */
++#define UAC2_ATTRIBUTE_S32(name)					\
++static ssize_t f_uac2_opts_##name##_show(struct config_item *item,	\
++					 char *page)			\
++{									\
++	struct f_uac2_opts *opts = to_f_uac2_opts(item);		\
++	int result;							\
++									\
++	mutex_lock(&opts->lock);					\
++	result = sprintf(page, "%d\n", opts->name);			\
++	mutex_unlock(&opts->lock);					\
++									\
++	return result;							\
++}									\
++									\
++static ssize_t f_uac2_opts_##name##_store(struct config_item *item,	\
++					  const char *page, size_t len)	\
++{									\
++	struct f_uac2_opts *opts = to_f_uac2_opts(item);		\
++	int ret;							\
++	s32 num;							\
++									\
++	mutex_lock(&opts->lock);					\
++	if (opts->refcnt) {						\
++		ret = -EBUSY;						\
++		goto end;						\
++	}								\
++									\
++	ret = kstrtos32(page, 0, &num);					\
++	if (ret)							\
++		goto end;						\
++									\
++	opts->name = num;						\
++	ret = len;							\
++									\
++end:									\
++	mutex_unlock(&opts->lock);					\
++	return ret;							\
++}									\
++									\
++CONFIGFS_ATTR(f_uac2_opts_, name)
++
+ UAC2_ATTRIBUTE(c_chmask);
+ UAC2_ATTRIBUTE(c_srate);
+ UAC2_ATTRIBUTE(c_ssize);
+ UAC2_ATTRIBUTE(req_number);
++UAC2_ATTRIBUTE_S32(c_volume);	/* initial FU volume, Q8.8 dB (signed) */
++UAC2_ATTRIBUTE(c_mute);		/* initial FU mute, 0/1 */
+ 
+ static struct configfs_attribute *f_uac2_attrs[] = {
+-	&f_uac2_opts_attr_p_chmask,
+-	&f_uac2_opts_attr_p_srate,
+-	&f_uac2_opts_attr_p_ssize,
+ 	&f_uac2_opts_attr_c_chmask,
+ 	&f_uac2_opts_attr_c_srate,
+ 	&f_uac2_opts_attr_c_ssize,
+ 	&f_uac2_opts_attr_req_number,
++	&f_uac2_opts_attr_c_volume,
++	&f_uac2_opts_attr_c_mute,
+ 	NULL,
+ };
+ 
+@@ -951,13 +1040,12 @@ static struct usb_function_instance *afunc_alloc_inst(void)
+ 	config_group_init_type_name(&opts->func_inst.group, "",
+ 				    &f_uac2_func_type);
+ 
+-	opts->p_chmask = UAC2_DEF_PCHMASK;
+-	opts->p_srate = UAC2_DEF_PSRATE;
+-	opts->p_ssize = UAC2_DEF_PSSIZE;
+ 	opts->c_chmask = UAC2_DEF_CCHMASK;
+ 	opts->c_srate = UAC2_DEF_CSRATE;
+ 	opts->c_ssize = UAC2_DEF_CSSIZE;
+ 	opts->req_number = UAC2_DEF_REQ_NUM;
++	opts->c_volume = UAC2_DEF_CVOLUME;
++	opts->c_mute = UAC2_DEF_CMUTE;
+ 	return &opts->func_inst;
+ }
+ 
+diff --git a/drivers/usb/gadget/function/u_audio.c b/drivers/usb/gadget/function/u_audio.c
+index d3a639297..3ef3a1cca 100644
+--- a/drivers/usb/gadget/function/u_audio.c
++++ b/drivers/usb/gadget/function/u_audio.c
+@@ -23,12 +23,17 @@
+ 
+ #include <linux/module.h>
+ #include <sound/core.h>
++#include <sound/control.h>
+ #include <sound/pcm.h>
+ #include <sound/pcm_params.h>
+ 
+ #include "u_audio.h"
+ 
+-#define BUFF_SIZE_MAX	(PAGE_SIZE * 16)
++/* 32 pages (128KB) so the capture ring can hold 32 x 512-frame periods at
++ * 24-bit stereo (98KB). At 352.8/384k the old 16-page cap limited the ring to
++ * ~21ms, leaving only ~8ms of scheduler-stall margin below the emergency mark;
++ * 32 periods brings the top rates to the same ~42ms ring as every other band. */
++#define BUFF_SIZE_MAX	(PAGE_SIZE * 32)
+ #define PRD_SIZE_MAX	PAGE_SIZE
+ #define MIN_PERIODS	4
+ 
+@@ -52,6 +57,9 @@ struct uac_rtd_params {
+ 	unsigned max_psize;	/* MaxPacketSize of endpoint */
+ 	struct uac_req *ureq;
+ 
++	/* authoritative running host-selected rate (Clock SET_CUR). */
++	unsigned int srate_active;
++
+ 	spinlock_t lock;
+ };
+ 
+@@ -64,6 +72,13 @@ struct snd_uac_chip {
+ 	struct snd_card *card;
+ 	struct snd_pcm *pcm;
+ 
++	/* Production control handles.  The UAC2 request callbacks update the
++	 * backing state and notify these controls so userspace can block on ALSA
++	 * events instead of polling at 10/100 Hz. */
++	struct snd_kcontrol *rate_kctl;
++	struct snd_kcontrol *volume_kctl;
++	struct snd_kcontrol *mute_kctl;
++
+ 	/* timekeeping for the playback endpoint */
+ 	unsigned int p_interval;
+ 	unsigned int p_residue;
+@@ -72,6 +87,24 @@ struct snd_uac_chip {
+ 	unsigned int p_pktsize;
+ 	unsigned int p_pktsize_residue;
+ 	unsigned int p_framesize;
++
++	/* host volume/mute from the Feature Unit (single source of truth). */
++	int host_volume;	/* signed Q8.8 dB */
++	int host_mute;		/* 0/1 */
++};
++
++/* the eight discrete capture (host->device OUT) rates. 4.14 has no
++ * SNDRV_PCM_RATE_ bit for 352800/384000, so the .rates mask advertises the bits it
++ * does have plus SNDRV_PCM_RATE_KNOT, and this explicit constraint list is what
++ * actually enforces the discrete whitelist (incl. 352.8/384k). Keep in sync with
++ * f_uac2 c_srate_list[]. */
++static const unsigned int u_audio_rates[] = {
++	44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
++};
++static const struct snd_pcm_hw_constraint_list u_audio_rate_constraints = {
++	.count = ARRAY_SIZE(u_audio_rates),
++	.list = u_audio_rates,
++	.mask = 0,
+ };
+ 
+ static const struct snd_pcm_hardware uac_pcm_hardware = {
+@@ -267,7 +300,7 @@ static int uac_pcm_open(struct snd_pcm_substream *substream)
+ 	struct g_audio *audio_dev;
+ 	struct uac_params *params;
+ 	int p_ssize, c_ssize;
+-	int p_srate, c_srate;
++	int p_srate;
+ 	int p_chmask, c_chmask;
+ 
+ 	audio_dev = uac->audio_dev;
+@@ -275,7 +308,6 @@ static int uac_pcm_open(struct snd_pcm_substream *substream)
+ 	p_ssize = params->p_ssize;
+ 	c_ssize = params->c_ssize;
+ 	p_srate = params->p_srate;
+-	c_srate = params->c_srate;
+ 	p_chmask = params->p_chmask;
+ 	c_chmask = params->c_chmask;
+ 	uac->p_residue = 0;
+@@ -301,7 +333,15 @@ static int uac_pcm_open(struct snd_pcm_substream *substream)
+ 						/ runtime->hw.periods_min;
+ 	} else {
+ 		spin_lock_init(&uac->c_prm.lock);
+-		runtime->hw.rate_min = c_srate;
++		/* the OUT (capture) stream advertises the eight discrete rates the
++		 * Clock Source offers. 4.14 lacks rate bits for 352.8/384k, so use the
++		 * available bits | KNOT here and enforce the real whitelist with the
++		 * constraint list below. Keep in sync with f_uac2 c_srate_list. */
++		runtime->hw.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
++				    SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000 |
++				    SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000 |
++				    SNDRV_PCM_RATE_KNOT;
++		runtime->hw.rate_min = 44100;
+ 		switch (c_ssize) {
+ 		case 3:
+ 			runtime->hw.formats = SNDRV_PCM_FMTBIT_S24_3LE;
+@@ -318,11 +358,20 @@ static int uac_pcm_open(struct snd_pcm_substream *substream)
+ 						/ runtime->hw.periods_min;
+ 	}
+ 
+-	runtime->hw.rate_max = runtime->hw.rate_min;
++	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
++		runtime->hw.rate_max = 384000;
++	else
++		runtime->hw.rate_max = runtime->hw.rate_min;
+ 	runtime->hw.channels_max = runtime->hw.channels_min;
+ 
+ 	snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+ 
++	/* enforce the exact discrete rate whitelist (covers 352.8/384k, which
++	 * have no SNDRV_PCM_RATE_ bit). Only the capture stream has real rates. */
++	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
++		snd_pcm_hw_constraint_list(runtime, 0, SNDRV_PCM_HW_PARAM_RATE,
++					   &u_audio_rate_constraints);
++
+ 	return 0;
+ }
+ 
+@@ -385,7 +434,19 @@ int u_audio_start_capture(struct g_audio *audio_dev)
+ 	ep = audio_dev->out_ep;
+ 	prm = &uac->c_prm;
+ 	config_ep_by_speed(gadget, &audio_dev->func, ep);
+-	req_len = prm->max_psize;
++	/* size each RX request from the ACTIVE speed's endpoint descriptor
++	 * (base * mult), not the cross-speed maximum. prm->max_psize is
++	 * max(FS, HS) capacity; when the HS packet is smaller than the FS one
++	 * (bInterval<4), a max-sized request exceeds the endpoint's per-interval
++	 * capacity and ci_hdrc rejects EVERY queue with -EMSGSIZE -- the gadget
++	 * then receives nothing while the host streams normally (the original,
++	 * misattributed "earlier bInterval failure"). rbuf slots are max_psize-sized,
++	 * so capping at max_psize keeps the buffers valid at either speed. */
++	req_len = usb_endpoint_maxp(ep->desc) * usb_endpoint_maxp_mult(ep->desc);
++	if (req_len > prm->max_psize)
++		req_len = prm->max_psize;
++	if (!req_len)
++		req_len = prm->max_psize;
+ 
+ 	prm->ep_enabled = true;
+ 	usb_ep_enable(ep);
+@@ -498,6 +559,181 @@ void u_audio_stop_playback(struct g_audio *audio_dev)
+ }
+ EXPORT_SYMBOL_GPL(u_audio_stop_playback);
+ 
++/* read-only "Capture Current Rate" control. Reports the running OUT rate the
++ * host selected via Clock SET_CUR. This is a production interface:
++ * the userspace bridge reads it to open card2/card1 at the host-selected rate. */
++static int u_audio_current_rate_info(struct snd_kcontrol *kcontrol,
++				     struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count = 1;
++	uinfo->value.integer.min = 0;
++	uinfo->value.integer.max = 768000;	/* headroom for higher rates */
++	uinfo->value.integer.step = 1;
++	return 0;
++}
++
++static int u_audio_current_rate_get(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_value *ucontrol)
++{
++	struct uac_rtd_params *prm = snd_kcontrol_chip(kcontrol);
++
++	ucontrol->value.integer.value[0] = READ_ONCE(prm->srate_active);
++	return 0;
++}
++
++static const struct snd_kcontrol_new u_audio_current_rate_control = {
++	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
++	.name = "Capture Current Rate",
++	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
++	.info = u_audio_current_rate_info,
++	.get = u_audio_current_rate_get,
++};
++
++/* called from f_uac2 when the host selects a rate via Clock SET_CUR. The
++ * Current Rate control reflects this authoritative running rate. */
++void u_audio_set_capture_srate(struct g_audio *audio_dev, int srate)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++	unsigned int old;
++
++	if (!uac)
++		return;
++	old = READ_ONCE(uac->c_prm.srate_active);
++	if (old == srate)
++		return;
++	WRITE_ONCE(uac->c_prm.srate_active, srate);
++	if (uac->card && uac->rate_kctl)
++		snd_ctl_notify(uac->card, SNDRV_CTL_EVENT_MASK_VALUE,
++			       &uac->rate_kctl->id);
++}
++EXPORT_SYMBOL_GPL(u_audio_set_capture_srate);
++
++/* the single authoritative running rate (Clock GET_CUR reads this). */
++int u_audio_get_capture_srate(struct g_audio *audio_dev)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++
++	if (!uac)
++		return 0;
++	return READ_ONCE(uac->c_prm.srate_active);
++}
++EXPORT_SYMBOL_GPL(u_audio_get_capture_srate);
++
++/* read-only "Capture Host Volume" (signed Q8.8 dB) and "Capture Host Mute"
++ * (0/1) controls. the userspace bridge reads them and pushes the values to the card1 hardware
++ * mixer. Same single state as the Feature Unit GET_CUR/SET_CUR. */
++static int u_audio_host_volume_info(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count = 1;
++	uinfo->value.integer.min = -15360;	/* -60 dB Q8.8 */
++	uinfo->value.integer.max = -5120;	/* -20 dB, matches the USB FU safety cap */
++	uinfo->value.integer.step = 128;	/* 0.5 dB grid; -1 is never a valid value */
++	return 0;
++}
++
++static int u_audio_host_volume_get(struct snd_kcontrol *kcontrol,
++				   struct snd_ctl_elem_value *ucontrol)
++{
++	struct uac_rtd_params *prm = snd_kcontrol_chip(kcontrol);
++
++	ucontrol->value.integer.value[0] = READ_ONCE(prm->uac->host_volume);
++	return 0;
++}
++
++static const struct snd_kcontrol_new u_audio_host_volume_control = {
++	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
++	.name = "Capture Host Volume",
++	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
++	.info = u_audio_host_volume_info,
++	.get = u_audio_host_volume_get,
++};
++
++static int u_audio_host_mute_info(struct snd_kcontrol *kcontrol,
++				  struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count = 1;
++	uinfo->value.integer.min = 0;
++	uinfo->value.integer.max = 1;
++	uinfo->value.integer.step = 1;
++	return 0;
++}
++
++static int u_audio_host_mute_get(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *ucontrol)
++{
++	struct uac_rtd_params *prm = snd_kcontrol_chip(kcontrol);
++
++	ucontrol->value.integer.value[0] = READ_ONCE(prm->uac->host_mute);
++	return 0;
++}
++
++static const struct snd_kcontrol_new u_audio_host_mute_control = {
++	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
++	.name = "Capture Host Mute",
++	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
++	.info = u_audio_host_mute_info,
++	.get = u_audio_host_mute_get,
++};
++
++void u_audio_set_host_volume(struct g_audio *audio_dev, int volume_q8)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++	int old;
++
++	if (!uac)
++		return;
++	old = READ_ONCE(uac->host_volume);
++	if (old == volume_q8)
++		return;
++	WRITE_ONCE(uac->host_volume, volume_q8);
++	if (uac->card && uac->volume_kctl)
++		snd_ctl_notify(uac->card, SNDRV_CTL_EVENT_MASK_VALUE,
++			       &uac->volume_kctl->id);
++}
++EXPORT_SYMBOL_GPL(u_audio_set_host_volume);
++
++int u_audio_get_host_volume(struct g_audio *audio_dev)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++
++	if (!uac)
++		return 0;
++	return READ_ONCE(uac->host_volume);
++}
++EXPORT_SYMBOL_GPL(u_audio_get_host_volume);
++
++void u_audio_set_host_mute(struct g_audio *audio_dev, int mute)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++	int value, old;
++
++	if (!uac)
++		return;
++	value = mute ? 1 : 0;
++	old = READ_ONCE(uac->host_mute);
++	if (old == value)
++		return;
++	WRITE_ONCE(uac->host_mute, value);
++	if (uac->card && uac->mute_kctl)
++		snd_ctl_notify(uac->card, SNDRV_CTL_EVENT_MASK_VALUE,
++			       &uac->mute_kctl->id);
++}
++EXPORT_SYMBOL_GPL(u_audio_set_host_mute);
++
++int u_audio_get_host_mute(struct g_audio *audio_dev)
++{
++	struct snd_uac_chip *uac = audio_dev->uac;
++
++	if (!uac)
++		return 0;
++	return READ_ONCE(uac->host_mute);
++}
++EXPORT_SYMBOL_GPL(u_audio_get_host_mute);
++
+ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
+ 					const char *card_name)
+ {
+@@ -525,6 +761,9 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
+ 		struct uac_rtd_params *prm = &uac->c_prm;
+ 
+ 		uac->c_prm.uac = uac;
++		/* seed the running rate from configfs; f_uac2 bind overrides it to
++		 * 48000 via u_audio_set_capture_srate right after g_audio_setup. */
++		prm->srate_active = params->c_srate;
+ 		prm->max_psize = g_audio->out_ep_maxpsize;
+ 
+ 		prm->ureq = kcalloc(params->req_number, sizeof(struct uac_req),
+@@ -589,6 +828,42 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
+ 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &uac_pcm_ops);
+ 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &uac_pcm_ops);
+ 
++	/* Production controls consumed by the userspace bridge. */
++	if (c_chmask) {
++		/* read-only Current Rate control (host-selected OUT rate). */
++		struct snd_kcontrol *kctl = snd_ctl_new1(
++				&u_audio_current_rate_control, &uac->c_prm);
++		if (!kctl) {
++			err = -ENOMEM;
++			goto snd_fail;
++		}
++		err = snd_ctl_add(card, kctl);
++		if (err < 0)
++			goto snd_fail;
++		uac->rate_kctl = kctl;
++
++		/* read-only host volume + mute controls (Feature Unit state). */
++		kctl = snd_ctl_new1(&u_audio_host_volume_control, &uac->c_prm);
++		if (!kctl) {
++			err = -ENOMEM;
++			goto snd_fail;
++		}
++		err = snd_ctl_add(card, kctl);
++		if (err < 0)
++			goto snd_fail;
++		uac->volume_kctl = kctl;
++
++		kctl = snd_ctl_new1(&u_audio_host_mute_control, &uac->c_prm);
++		if (!kctl) {
++			err = -ENOMEM;
++			goto snd_fail;
++		}
++		err = snd_ctl_add(card, kctl);
++		if (err < 0)
++			goto snd_fail;
++		uac->mute_kctl = kctl;
++	}
++
+ 	strlcpy(card->driver, card_name, sizeof(card->driver));
+ 	strlcpy(card->shortname, card_name, sizeof(card->shortname));
+ 	sprintf(card->longname, "%s %i", card_name, card->dev->id);
+diff --git a/drivers/usb/gadget/function/u_audio.h b/drivers/usb/gadget/function/u_audio.h
+index 07e13784c..ee4017eb9 100644
+--- a/drivers/usb/gadget/function/u_audio.h
++++ b/drivers/usb/gadget/function/u_audio.h
+@@ -89,6 +89,19 @@ void g_audio_cleanup(struct g_audio *g_audio);
+ 
+ int u_audio_start_capture(struct g_audio *g_audio);
+ void u_audio_stop_capture(struct g_audio *g_audio);
++/* the running capture (host->device OUT) rate selected via Clock SET_CUR.
++ * srate_active is the single authoritative value used by GET_CUR, the
++ * Current Rate control, and the userspace bridge. */
++void u_audio_set_capture_srate(struct g_audio *g_audio, int srate);
++int u_audio_get_capture_srate(struct g_audio *g_audio);
++
++/* host volume (signed Q8.8 dB) and mute (0/1) from the Feature Unit. Single
++ * authoritative state for GET_CUR, the "Capture Host Volume/Mute" controls, and the
++ * bridge (which pushes it to the card1 hardware mixer). */
++void u_audio_set_host_volume(struct g_audio *g_audio, int volume_q8);
++int u_audio_get_host_volume(struct g_audio *g_audio);
++void u_audio_set_host_mute(struct g_audio *g_audio, int mute);
++int u_audio_get_host_mute(struct g_audio *g_audio);
+ int u_audio_start_playback(struct g_audio *g_audio);
+ void u_audio_stop_playback(struct g_audio *g_audio);
+ 
+diff --git a/drivers/usb/gadget/function/u_uac2.h b/drivers/usb/gadget/function/u_uac2.h
+index 19eeb8353..8c0c4abdb 100644
+--- a/drivers/usb/gadget/function/u_uac2.h
++++ b/drivers/usb/gadget/function/u_uac2.h
+@@ -18,23 +18,26 @@
+ 
+ #include <linux/usb/composite.h>
+ 
+-#define UAC2_DEF_PCHMASK 0x3
+-#define UAC2_DEF_PSRATE 48000
+-#define UAC2_DEF_PSSIZE 2
+ #define UAC2_DEF_CCHMASK 0x3
+-#define UAC2_DEF_CSRATE 64000
+-#define UAC2_DEF_CSSIZE 2
++#define UAC2_DEF_CSRATE 48000
++#define UAC2_DEF_CSSIZE 3
+ #define UAC2_DEF_REQ_NUM 2
++/* initial host volume/mute for the Feature Unit. c_volume is signed Q8.8 dB.
++ * usb-dac.sh overwrites these from the live hardware volume before bind so the host's
++ * first GET_CUR matches the current DAC volume (no jump). Defaults are FAIL-SAFE
++ * (minimum volume + muted): if the script somehow fails to set them, the device
++ * comes up silent rather than at 0 dB unmuted. */
++#define UAC2_DEF_CVOLUME (-15360)	/* -60 dB */
++#define UAC2_DEF_CMUTE 1		/* muted */
+ 
+ struct f_uac2_opts {
+ 	struct usb_function_instance	func_inst;
+-	int				p_chmask;
+-	int				p_srate;
+-	int				p_ssize;
+ 	int				c_chmask;
+ 	int				c_srate;
+ 	int				c_ssize;
+ 	int				req_number;
++	int				c_volume;	/* initial FU volume, Q8.8 dB */
++	int				c_mute;		/* initial FU mute, 0/1 */
+ 	bool				bound;
+ 
+ 	struct mutex			lock;
+diff --git a/sound/soc/codecs/cxd3778gf/cxd3778gf_control.c b/sound/soc/codecs/cxd3778gf/cxd3778gf_control.c
+index 7644efca0..5b6bd0998 100644
+--- a/sound/soc/codecs/cxd3778gf/cxd3778gf_control.c
++++ b/sound/soc/codecs/cxd3778gf/cxd3778gf_control.c
+@@ -1071,6 +1071,23 @@ int cxd3778gf_set_std_playback_dai_rate(unsigned int rate)
+ 
+ 	change_sample_rate_std(rate);
+ 
++	/* The ICX (hi-res) stream owns the shared external oscillator. While it
++	 * is active (USB-DAC bridge playing), a concurrent STD open (Android UI/media
++	 * sounds on the other PCM device) must NOT retune the clock family: it
++	 * overwrote the global present.sample_rate (e.g. 48000 over a running 44.1k
++	 * ICX stream), change_external_osc() then switched the 22.5792M/24.576M
++	 * oscillator under the live stream (+8.8% pitch), and nothing restored it on
++	 * STD close. change_sample_rate_std() above only configures the SD2 input
++	 * registers, so the STD stream still plays -- merely clocked from the ICX
++	 * family (slightly off-speed UI sounds, inaudible in practice). When ICX is
++	 * idle the STD path behaves exactly as before. This mirrors Sony's own
++	 * non-STD_PATH_CLK_CHANGE variant of suitable_external_osc(), where STD
++	 * playback never drives the oscillator. */
++	if (present.icx_playback_active > 0) {
++		mutex_unlock(global_mutex);
++		return 0;
++	}
++
+ #ifdef STD_PATH_CLK_CHANGE
+ 	present.sample_rate = rate;
+ #endif

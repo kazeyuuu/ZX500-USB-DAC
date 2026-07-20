@@ -1,0 +1,15 @@
+.DS_Store
+
+# Locally packed boot images are release artifacts, not source files.
+*.img
+!blank_vbmeta.img
+
+# APK signing material and build output.
+*.idsig
+app/*.keystore
+app/build/
+app/out/
+
+# Local dependency/build directories.
+bridge/.build/
+__pycache__/
