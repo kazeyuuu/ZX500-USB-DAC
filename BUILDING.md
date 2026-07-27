@@ -1,5 +1,7 @@
 # Build and deployment
 
+**English** | [简体中文](BUILDING.zh-CN.md)
+
 ## Exact source baselines
 
 | Component | Baseline |

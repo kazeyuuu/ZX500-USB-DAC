@@ -1,5 +1,7 @@
 # ZX500 USB-DAC
 
+**English** | [简体中文](README.zh-CN.md)
+
 Turn a Sony NW-ZX505 into a native UAC2 USB DAC. This release contains only the
 final production implementation and its matching diagnostic bridge.
 
