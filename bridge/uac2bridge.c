@@ -137,7 +137,15 @@ static void hreset(struct hist *h){ memset(h,0,sizeof *h); }
 #define MUTE_CTL_NAME "Capture Host Mute"
 #define HW_VOL_NAME   "master volume"    /* card1 int 0..120 (Sony UI/table index) */
 #define HW_MUTE_NAME  "playback mute"    /* card1 bool */
-#define HW_VOL_SAFE_MAX 80  /* defense-in-depth: never drive Sony above -20 dB */
+/* The host volume range is fixed at the bottom and configurable at the top: the
+ * user picks the ceiling, usb-dac.sh writes it to configfs, and the kernel then
+ * advertises it both in the Feature Unit and as this control's range maximum. The
+ * bridge reads it from the control instead of keeping a second copy that could
+ * disagree. Q8.8 dB throughout; one 0.5 dB step is one Sony hardware index. */
+#define VOL_Q8_MIN    (-15360)  /* -60 dB = hardware index 0 */
+#define VOL_Q8_STEP   128       /* 0.5 dB = one index */
+#define VOL_Q8_CEIL   0         /* 0 dB = index 120, Sony full scale */
+#define VOL_Q8_SAFE   (-5120)   /* -20 dB; used when the range reads implausible */
 #define CONTROL_RETRY_US 200000
 #define CONTROL_RESYNC_MS 2000
 
@@ -181,6 +189,18 @@ static void apply_host_controls(int hw, int mute, int *last_hw, int *last_mute){
     if(m1) mixer_close(m1);
 }
 
+/* Top of the host volume range, taken from the control the kernel publishes it on.
+ * A value that is out of range or off the 0.5 dB grid cannot be trusted to convert
+ * to a hardware index, so fall back to the conservative -20 dB rather than to
+ * whatever the read returned. */
+static int host_vol_ceiling(struct mixer_ctl *host_vol){
+    int vmax = mixer_ctl_get_range_max(host_vol);
+    if(vmax < VOL_Q8_MIN || vmax > VOL_Q8_CEIL ||
+       ((vmax - VOL_Q8_MIN) % VOL_Q8_STEP) != 0)
+        return VOL_Q8_SAFE;
+    return vmax;
+}
+
 /* Read all three controls after an ALSA event (or the low-frequency liveness
  * timeout). Reading them together makes event coalescing harmless. */
 static void sync_host_controls(struct mixer_ctl *rate_ctl,
@@ -196,10 +216,12 @@ static void sync_host_controls(struct mixer_ctl *rate_ctl,
 
     /* tinyalsa returns -1 on a failed read. Only accept the kernel's 0.5dB
      * grid; an anomalous read must never become a loud target. */
-    if(vq8 >= -15360 && vq8 <= -5120 &&
-       ((vq8 + 15360) % 128) == 0 && (mute == 0 || mute == 1)){
-        int hw = (vq8 + 15360) / 128;
-        if(hw > HW_VOL_SAFE_MAX) hw = HW_VOL_SAFE_MAX;
+    int vq8_max = host_vol_ceiling(host_vol);
+    if(vq8 >= VOL_Q8_MIN && vq8 <= vq8_max &&
+       ((vq8 - VOL_Q8_MIN) % VOL_Q8_STEP) == 0 && (mute == 0 || mute == 1)){
+        int hw = (vq8 - VOL_Q8_MIN) / VOL_Q8_STEP;
+        int hw_max = (vq8_max - VOL_Q8_MIN) / VOL_Q8_STEP;
+        if(hw > hw_max) hw = hw_max;
         if(hw != *last_hw || mute != *last_mute)
             apply_host_controls(hw, mute, last_hw, last_mute);
     }

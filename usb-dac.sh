@@ -49,7 +49,65 @@ kill_bridges(){
   for KP in $(pidof uac2bridge 2>/dev/null); do stop_bridge_pid "$KP"; done
 }
 FLAG=/data/adb/usbdac.autostart
+# Why the last start failed. A failed start is rare, and when it happens the USB
+# link is usually gone with it -- no adb, and the boot service discards output --
+# so one small write here is what makes the failure diagnosable at all. Success
+# writes nothing; it only clears a stale file if one exists.
+ERRFILE=/data/adb/usbdac.lasterror
+# Set once on() has taken the ordinary gadget down, so failures know they have
+# something to put back. Empty means USB was never touched and must be left alone.
+USBCFG_PREV=
+# Highest Sony hardware volume index the host's slider is allowed to reach. The
+# host range is always anchored at index 0 (-60 dB) and one 0.5 dB step is one
+# index, so this alone decides how loud USB playback can get. Written to configfs
+# before bind; the kernel advertises it and the bridge reads it back from the
+# control. Only `maxvol` writes the file, so a normal boot performs no flash write.
+MAXVOL_FILE=/data/adb/usbdac.maxvol
+MAXVOL_DEFAULT=100                      # -10 dB; Sony's own scale ends at 120
+MAXVOL_LIMIT=120                        # 0 dB, full scale
+# Fraction of the ceiling to fall back to when the inherited volume exceeds it.
+# Starting at the ceiling itself would be startlingly loud, so come up quiet.
+MAXVOL_FALLBACK_PCT=30
+
+# Read one integer mixer control on card1. `tinymix -D 1 <id>` prints
+# "master volume: 30 (dsrange 0->120)", so the value has to be cut out from
+# between the colon and the range -- taking everything after the colon drags the
+# range along and every comparison against it then fails.
+read_ctl(){
+  tinymix -D 1 "$1" 2>/dev/null | sed 's/.*: *//; s/[^0-9].*//'
+}
+
+read_maxvol(){
+  RM=$(cat "$MAXVOL_FILE" 2>/dev/null)
+  case "$RM" in ''|*[!0-9]*) RM=$MAXVOL_DEFAULT;; esac
+  [ "$RM" -ge 1 ] && [ "$RM" -le "$MAXVOL_LIMIT" ] || RM=$MAXVOL_DEFAULT
+  printf '%s\n' "$RM"
+}
 mixer(){ tinymix -D 1 "$@" >/dev/null 2>&1; }
+
+record_failure(){
+  mkdir -p /data/adb 2>/dev/null
+  printf '%s (uptime %ss)\n' "$1" "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)" \
+    > "$ERRFILE" 2>/dev/null
+}
+clear_failure(){ [ -e "$ERRFILE" ] && rm -f "$ERRFILE"; return 0; }
+
+# What USB should look like when the DAC is not running. Android keeps the user's
+# own choice here, so restoring it is closer to "as it was" than assuming adb.
+default_usb_config(){
+  DC=$(getprop persist.sys.usb.config 2>/dev/null)
+  case "$DC" in ''|none) DC=adb;; esac
+  printf '%s\n' "$DC"
+}
+
+# Put back an ordinary gadget after the DAC one has been dismantled. The imx HAL
+# does not fully resynchronise without a reboot, so this is best-effort -- but
+# trying costs nothing, and not trying leaves the user with no USB at all.
+restore_usb_config(){
+  RC=$USBCFG_PREV
+  case "$RC" in ''|none) RC=$(default_usb_config);; esac
+  setprop sys.usb.config "$RC" 2>/dev/null
+}
 clear_links(){ for l in "$G"/configs/b.1/*; do [ -L "$l" ] && rm -f "$l"; done; }
 
 # configfs may accept a write syscall yet retain an old value. Audio-format and
@@ -81,9 +139,15 @@ abort_start(){
   if unbind_udc; then
     clear_links
     rmdir "$G/functions/uac2.0" 2>/dev/null
+    # Only meaningful once the ordinary gadget was actually dismantled. Without
+    # this the device is left with no gadget at all: no DAC, no MTP, no adb, and
+    # nothing the user can do but reboot.
+    [ -n "$USBCFG_PREV" ] && restore_usb_config
     echo "ERROR: $1; USB-DAC confirmed unbound" >&2
+    record_failure "$1; unbound, USB restore attempted"
   else
     echo "CRITICAL: $1; UDC still bound and no bridge is running" >&2
+    record_failure "$1; UDC STILL BOUND"
   fi
 }
 
@@ -121,7 +185,11 @@ on(){
   # adb push writes 0666; the bridge must be executable or setsid silently fails.
   # Only chmod if it isn't already executable (a chmod is a flash metadata write).
   [ -x "$BRIDGE" ] || chmod 0755 "$BRIDGE" 2>/dev/null
-  [ -x "$BRIDGE" ] || { echo "ERROR: bridge missing or not executable: $BRIDGE" >&2; return 1; }
+  [ -x "$BRIDGE" ] || {
+    echo "ERROR: bridge missing or not executable: $BRIDGE" >&2
+    record_failure "bridge missing or not executable"
+    return 1
+  }
   # Stop the old bridge first so its short-lived card1 control transaction cannot
   # race the safety snapshot. USB remains bound and configfs is untouched until the
   # snapshot below succeeds.
@@ -144,21 +212,36 @@ on(){
   # bridge first (above), lower an unsafe inherited Sony volume before binding
   # USB, and verify the write.  Thus no host can start a stream during a brief
   # full-scale window if the inherited Sony volume is above the USB-DAC ceiling.
-  if [ "$HWVOL" -gt 80 ]; then
-    tinymix -D 1 9 80 >/dev/null 2>&1 || { abort_start "cannot apply safe volume ceiling"; return 1; }
-    HWVOL=$(tinymix -D 1 9 2>/dev/null | sed 's/.*: //')
-    [ "$HWVOL" = 80 ] || { abort_start "safe volume readback mismatch"; return 1; }
+  # Exceeding the ceiling is not a reason to refuse to start -- come up at a
+  # fraction of it instead.  Only a volume we cannot set and verify is fatal,
+  # because then the level going into the stream is unknown.
+  MAXVOL=$(read_maxvol)
+  if [ "$HWVOL" -gt "$MAXVOL" ]; then
+    # Integer division makes this 0 for a ceiling below 4, which would come up
+    # silent and look like a failure. One index is quiet enough.
+    SAFEVOL=$(( MAXVOL * MAXVOL_FALLBACK_PCT / 100 ))
+    [ "$SAFEVOL" -ge 1 ] || SAFEVOL=1
+    tinymix -D 1 9 "$SAFEVOL" >/dev/null 2>&1 || { abort_start "cannot apply safe volume"; return 1; }
+    HWVOL=$(read_ctl 9)
+    [ "$HWVOL" = "$SAFEVOL" ] || { abort_start "safe volume readback mismatch ($HWVOL)"; return 1; }
   fi
   CVOL=$(( (HWVOL - 120) * 128 ))
+  CVOLMAX=$(( (MAXVOL - 120) * 128 ))
 
+  # Remember what USB looked like before dismantling it, so a failure past this
+  # point can put it back rather than leaving the port dead.
+  USBCFG_PREV=$(getprop sys.usb.config)
   setprop sys.usb.config none; sleep 1
   unbind_udc || { abort_start "cannot unbind existing UDC"; return 1; }
   clear_links
-  # Windows keys its audio endpoint cache on the USB serial. Use the physical
-  # device serial rather than a project-machine constant; keep bcdDevice at the
-  # Sony HAL value because this configfs rejects runtime rewrites.
+  # DAC mode gets its own serial, derived from the physical one. Hosts key their
+  # per-device caches (Windows its audio endpoint properties in particular) on
+  # the USB serial, and MTP and UAC2 are not the same kind of device -- sharing
+  # one serial invites a host to carry state from one across to the other. Keep
+  # bcdDevice at the Sony HAL value: this configfs rejects runtime rewrites.
   SERIAL=$(getprop ro.serialno)
   [ -n "$SERIAL" ] || { abort_start "device serial is unavailable"; return 1; }
+  SERIAL="${SERIAL}DAC"
   write_attr_checked "$G/strings/0x409/serialnumber" "$SERIAL" || { abort_start "serialnumber readback mismatch"; return 1; }
   write_attr_checked "$G/strings/0x409/product" "ZX500 USB-DAC" || { abort_start "product readback mismatch"; return 1; }
   mkdir -p "$G/functions/uac2.0" || { abort_start "uac2 function creation failed"; return 1; }
@@ -171,8 +254,12 @@ on(){
   # c_volume = (hw-120)*128 (Q8.8), and ctl 13 "playback mute" -> c_mute. Strictly
   # validate, write, and READ BACK; abort (do NOT bind the UDC) on any failure --
   # never come up at an unknown/full volume.
+  # c_volume_max first: the kernel clamps the seeded c_volume against it, and the
+  # host must never be offered a range wider than the configured ceiling.
+  echo "$CVOLMAX" > "$G/functions/uac2.0/c_volume_max" || { abort_start "c_volume_max write failed"; return 1; }
   echo "$CVOL"   > "$G/functions/uac2.0/c_volume" || { abort_start "c_volume write failed"; return 1; }
   echo "$HWMUTE" > "$G/functions/uac2.0/c_mute"   || { abort_start "c_mute write failed"; return 1; }
+  [ "$(cat "$G/functions/uac2.0/c_volume_max" 2>/dev/null)" = "$CVOLMAX" ] || { abort_start "c_volume_max readback mismatch"; return 1; }
   [ "$(cat "$G/functions/uac2.0/c_volume" 2>/dev/null)" = "$CVOL" ] || { abort_start "c_volume readback mismatch"; return 1; }
   [ "$(cat "$G/functions/uac2.0/c_mute" 2>/dev/null)" = "$HWMUTE" ] || { abort_start "c_mute readback mismatch"; return 1; }
   write_attr_checked "$G/configs/b.1/strings/0x409/configuration" "USB-DAC" || { abort_start "configuration readback mismatch"; return 1; }
@@ -196,6 +283,7 @@ on(){
     abort_start "bridge failed to start"; return 1
   fi
   echo "USB-DAC ON: ${RATE}Hz/24bit amp=$AMP UDC=$(cat "$G/UDC") bridge=$BPID"
+  clear_failure
   restart_adbd_tcp_after_gadget
   return 0
 }
@@ -210,7 +298,9 @@ off(){
   fi
   kill_bridges
   clear_links; rmdir "$G/functions/uac2.0" 2>/dev/null
-  setprop sys.usb.config none; sleep 1; setprop sys.usb.config adb
+  # Restore Android's own USB choice rather than forcing adb on: with debugging
+  # disabled that used to leave an adb interface with no daemon behind it.
+  setprop sys.usb.config none; sleep 1; setprop sys.usb.config "$(default_usb_config)"
   echo "USB-DAC OFF: UDC confirmed unbound (reboot to fully restore USB)"
   return 0
 }
@@ -229,6 +319,16 @@ appstatus(){
     MUTEV=$(tinymix -D 2 2>/dev/null | awk '/Capture Host Mute/{print $NF}')
   fi
   echo "MODE=$MODE"; echo "RATE=${R:-48000}"; echo "BITS=24"; echo "AUTOSTART=$AS"; echo "HOSTRATE=${HR:-0}"
+  # MAXVOL is what is configured; MAXVOLACTIVE is what the running gadget was
+  # actually built with. They differ between changing the ceiling and restarting
+  # DAC mode, which is exactly when someone would wonder why nothing changed.
+  MVA=
+  if [ "$MODE" = DAC ]; then
+    CVM=$(cat "$G/functions/uac2.0/c_volume_max" 2>/dev/null)
+    case "$CVM" in ''|*[!0-9-]*) ;; *) MVA=$(( CVM / 128 + 120 ));; esac
+  fi
+  echo "MAXVOL=$(read_maxvol)"; echo "MAXVOLACTIVE=${MVA:-}"; echo "MAXVOLLIMIT=$MAXVOL_LIMIT"
+  echo "LASTERROR=$(cat "$ERRFILE" 2>/dev/null)"
   echo "DRIFT=fine"; echo "VOLUME=${VOL:-}"; echo "MUTE=${MUTEV:-}"
 }
 
@@ -243,9 +343,21 @@ case "${1:-status}" in
   mtp)  rm -f "$FLAG" || { echo "ERROR: cannot clear DAC autostart" >&2; exit 1; }
         echo "MTP set for next reboot (current USB-DAC remains active)";;
   off)  off;;
+  # Persist the ceiling. This is the only path that writes it, so a normal boot
+  # still performs no flash write. Takes effect the next time DAC mode starts.
+  maxvol)
+    NV=$2
+    case "$NV" in ''|*[!0-9]*) echo "usage: $0 maxvol <1-$MAXVOL_LIMIT>" >&2; exit 1;; esac
+    [ "$NV" -ge 1 ] && [ "$NV" -le "$MAXVOL_LIMIT" ] ||
+      { echo "ERROR: maxvol must be 1..$MAXVOL_LIMIT (Sony hardware index)" >&2; exit 1; }
+    if [ "$(cat "$MAXVOL_FILE" 2>/dev/null)" != "$NV" ]; then
+      mkdir -p /data/adb; printf '%s\n' "$NV" > "$MAXVOL_FILE" ||
+        { echo "ERROR: cannot persist maxvol" >&2; exit 1; }
+    fi
+    echo "MAXVOL=$NV (applies when DAC mode next starts)";;
   appstatus) appstatus;;
   status)
     echo "bridge=$(bridge_pid) drift=fine"; echo "config=$(getprop sys.usb.config)"; echo "UDC=$(cat "$G/UDC" 2>/dev/null)"
     cat /proc/asound/cards 2>/dev/null | grep -E "UAC2|cxd";;
-  *) echo "usage: $0 on|dac|mtp|off|status|appstatus" >&2; exit 1;;
+  *) echo "usage: $0 on|dac|mtp|off|status|appstatus|maxvol <1-$MAXVOL_LIMIT>" >&2; exit 1;;
 esac

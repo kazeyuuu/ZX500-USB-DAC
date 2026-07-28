@@ -12,6 +12,7 @@ import android.view.ViewGroup.LayoutParams;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -31,6 +32,11 @@ public class MainActivity extends Activity {
     TextView status;
     Button dacBtn, mtpBtn, refreshBtn;
     String mode = "?";
+    /* Highest Sony hardware index the host slider may reach. Applied by
+     * usb-dac.sh the next time DAC mode starts, not to the running stream. */
+    SeekBar maxVolBar;
+    TextView maxVolLabel;
+    int maxVolLimit = 120;
 
     int dp(int v){ return (int)(v * getResources().getDisplayMetrics().density); }
 
@@ -68,6 +74,14 @@ public class MainActivity extends Activity {
         modeRow.addView(mtpBtn, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         root.addView(modeRow, lp(dp(8)));
 
+        root.addView(label("最大音量上限"));
+        maxVolLabel = new TextView(this);
+        maxVolLabel.setTextSize(13); maxVolLabel.setTextColor(Color.parseColor("#222222"));
+        root.addView(maxVolLabel);
+        maxVolBar = new SeekBar(this);
+        maxVolBar.setMax(maxVolLimit - 1);   /* index 1..limit; 0 would be silence */
+        root.addView(maxVolBar, lp(dp(4)));
+
         refreshBtn = new Button(this); refreshBtn.setText("刷新状态");
         root.addView(refreshBtn, lp(dp(16)));
 
@@ -76,6 +90,8 @@ public class MainActivity extends Activity {
             + "• 采样率、音量、静音都在电脑系统中选择（macOS Audio MIDI Setup / Windows 声音设置）。\n"
             + "• 支持 44.1 / 48 / 88.2 / 96 / 176.4 / 192 / 352.8 / 384 kHz，24 bit，切换无需拔插。\n"
             + "• 本机音量已交给电脑控制；音量条即 ZX500 硬件音量。\n"
+            + "• 上限决定电脑音量条拉满时的响度，默认 100（Sony 满刻度为 120）。\n"
+            + "• 修改上限后需重新进入 DAC 模式才生效。\n"
             + "• 进入 DAC 后若电脑未识别，拔插一次 USB 线。\n"
             + "• 切到 MTP 需重启生效。\n"
             + "• 首次使用请在 KernelSU 里给本应用授予 root。");
@@ -85,6 +101,15 @@ public class MainActivity extends Activity {
 
         ScrollView sv = new ScrollView(this); sv.setBackgroundColor(Color.WHITE); sv.addView(root);
         setContentView(sv);
+
+        /* Track while dragging, persist once on release: one flash write per change. */
+        maxVolBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
+            public void onProgressChanged(SeekBar sb, int p, boolean fromUser){
+                if (fromUser) showMaxVol(p + 1);
+            }
+            public void onStartTrackingTouch(SeekBar sb){}
+            public void onStopTrackingTouch(SeekBar sb){ applyMaxVol(sb.getProgress() + 1); }
+        });
 
         dacBtn.setOnClickListener(new View.OnClickListener(){ public void onClick(View v){ switchToDac(); }});
         mtpBtn.setOnClickListener(new View.OnClickListener(){ public void onClick(View v){ switchToMtp(); }});
@@ -132,6 +157,25 @@ public class MainActivity extends Activity {
         dacBtn.setEnabled(on && !dac);
         mtpBtn.setEnabled(on && dac);
         refreshBtn.setEnabled(on);
+        maxVolBar.setEnabled(on);
+    }
+
+    /* One Sony index is 0.5 dB and index 120 is 0 dB, so the ceiling in dB is
+     * (index - 120) / 2. Shown alongside the raw index, which is what the Sony UI
+     * and `usb-dac.sh maxvol` both speak. */
+    void showMaxVol(int idx){
+        maxVolLabel.setText("电脑音量最大可到 " + idx + " / " + maxVolLimit
+                + "（" + String.format("%.1f", (idx - 120) / 2.0) + " dB）");
+    }
+
+    void applyMaxVol(final int idx){
+        bg(new Runnable(){ public void run(){
+            final SuResult res = runSu(SH + "maxvol " + idx);
+            ui.post(new Runnable(){ public void run(){
+                if(res.ok) toast("上限已设为 " + idx + "，下次进入 DAC 模式生效");
+                else { toast("设置失败：" + res.problem()); refresh(); }
+            }});
+        }});
     }
 
     void refresh(){
@@ -166,6 +210,14 @@ public class MainActivity extends Activity {
                 }
                 s.append("\n开机自动 DAC: ").append("1".equals(get(m,"AUTOSTART","0")) ? "是" : "否");
                 status.setText(s.toString());
+
+                int lim = pInt(get(m,"MAXVOLLIMIT","120"));
+                if (lim >= 1) { maxVolLimit = lim; maxVolBar.setMax(lim - 1); }
+                int mv = pInt(get(m,"MAXVOL","100"));
+                if (mv < 1) mv = 1; else if (mv > maxVolLimit) mv = maxVolLimit;
+                maxVolBar.setProgress(mv - 1);
+                showMaxVol(mv);
+
                 setControlsEnabled(true);
             }});
         }});
