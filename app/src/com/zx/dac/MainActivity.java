@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("hi-res USB-DAC 控制");
+        sub.setText(R.string.subtitle);
         sub.setTextSize(13); sub.setTextColor(Color.parseColor("#888888"));
         sub.setPadding(0,0,0,dp(16));
         root.addView(sub);
@@ -62,19 +62,19 @@ public class MainActivity extends Activity {
         status.setTextSize(15); status.setTextColor(Color.parseColor("#222222"));
         status.setPadding(dp(16),dp(16),dp(16),dp(16));
         status.setBackgroundColor(Color.parseColor("#F2F3F5"));
-        status.setText("读取状态中…");
+        status.setText(R.string.status_reading);
         root.addView(status, lp(dp(12)));
 
-        root.addView(label("USB 模式"));
+        root.addView(label(getString(R.string.section_usb_mode)));
         LinearLayout modeRow = new LinearLayout(this);
         modeRow.setOrientation(LinearLayout.HORIZONTAL);
-        dacBtn = new Button(this); dacBtn.setText("DAC 模式");
-        mtpBtn = new Button(this); mtpBtn.setText("MTP / 普通");
+        dacBtn = new Button(this); dacBtn.setText(R.string.btn_dac);
+        mtpBtn = new Button(this); mtpBtn.setText(R.string.btn_mtp);
         modeRow.addView(dacBtn, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         modeRow.addView(mtpBtn, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         root.addView(modeRow, lp(dp(8)));
 
-        root.addView(label("最大音量上限"));
+        root.addView(label(getString(R.string.section_max_volume)));
         maxVolLabel = new TextView(this);
         maxVolLabel.setTextSize(13); maxVolLabel.setTextColor(Color.parseColor("#222222"));
         root.addView(maxVolLabel);
@@ -82,19 +82,11 @@ public class MainActivity extends Activity {
         maxVolBar.setMax(maxVolLimit - 1);   /* index 1..limit; 0 would be silence */
         root.addView(maxVolBar, lp(dp(4)));
 
-        refreshBtn = new Button(this); refreshBtn.setText("刷新状态");
+        refreshBtn = new Button(this); refreshBtn.setText(R.string.btn_refresh);
         root.addView(refreshBtn, lp(dp(16)));
 
         TextView note = new TextView(this);
-        note.setText("说明：\n"
-            + "• 采样率、音量、静音都在电脑系统中选择（macOS Audio MIDI Setup / Windows 声音设置）。\n"
-            + "• 支持 44.1 / 48 / 88.2 / 96 / 176.4 / 192 / 352.8 / 384 kHz，24 bit，切换无需拔插。\n"
-            + "• 本机音量已交给电脑控制；音量条即 ZX500 硬件音量。\n"
-            + "• 上限决定电脑音量条拉满时的响度，默认 100（Sony 满刻度为 120）。\n"
-            + "• 修改上限后需重新进入 DAC 模式才生效。\n"
-            + "• 进入 DAC 后若电脑未识别，拔插一次 USB 线。\n"
-            + "• 切到 MTP 需重启生效。\n"
-            + "• 首次使用请在 KernelSU 里给本应用授予 root。");
+        note.setText(R.string.note);
         note.setTextSize(12); note.setTextColor(Color.parseColor("#999999"));
         note.setPadding(0,dp(20),0,0);
         root.addView(note);
@@ -164,28 +156,28 @@ public class MainActivity extends Activity {
      * (index - 120) / 2. Shown alongside the raw index, which is what the Sony UI
      * and `usb-dac.sh maxvol` both speak. */
     void showMaxVol(int idx){
-        maxVolLabel.setText("电脑音量最大可到 " + idx + " / " + maxVolLimit
-                + "（" + String.format("%.1f", (idx - 120) / 2.0) + " dB）");
+        maxVolLabel.setText(getString(R.string.maxvol_label, idx, maxVolLimit,
+                String.format("%.1f", (idx - 120) / 2.0)));
     }
 
     void applyMaxVol(final int idx){
         bg(new Runnable(){ public void run(){
             final SuResult res = runSu(SH + "maxvol " + idx);
             ui.post(new Runnable(){ public void run(){
-                if(res.ok) toast("上限已设为 " + idx + "，下次进入 DAC 模式生效");
-                else { toast("设置失败：" + res.problem()); refresh(); }
+                if(res.ok) toast(getString(R.string.maxvol_applied, idx));
+                else { toast(getString(R.string.maxvol_failed, res.problem())); refresh(); }
             }});
         }});
     }
 
     void refresh(){
-        status.setText("读取状态中…");
+        status.setText(R.string.status_reading);
         bg(new Runnable(){ public void run(){
             final SuResult res = runSu(SH + "appstatus");
             final Map<String,String> m = parse(res.out);
             ui.post(new Runnable(){ public void run(){
                 if(!res.ok){
-                    status.setText("无法读取状态。\n请在 KernelSU 里给本应用授予 root。\n\n" + res.problem());
+                    status.setText(getString(R.string.status_no_root, res.problem()));
                     setControlsEnabled(false);
                     refreshBtn.setEnabled(true);
                     return;
@@ -197,18 +189,19 @@ public class MainActivity extends Activity {
                 boolean fine = "fine".equals(get(m,"DRIFT","fine"));
 
                 StringBuilder s = new StringBuilder();
-                s.append("模式: ").append(dac ? "DAC (USB-DAC)" : "MTP / 普通");
+                s.append(getString(R.string.row_mode, getString(dac ? R.string.mode_dac : R.string.mode_mtp)));
                 if (dac) {
-                    s.append("\n采样率: ").append(host > 0
-                            ? (fmtRate(host) + "（由电脑选择）")
-                            : "待机（电脑无音频流）");
-                    s.append("\n位深: ").append(bits).append(" bit");
-                    s.append("\n漂移校正: ").append(fine ? "开 (fine)" : "关");
-                    s.append("\n音量: ").append(fmtVolume(get(m,"VOLUME",""), get(m,"MUTE","")));
+                    s.append(getString(R.string.row_rate, host > 0
+                            ? getString(R.string.rate_from_host, fmtRate(host))
+                            : getString(R.string.rate_idle)));
+                    s.append(getString(R.string.row_bits, bits));
+                    s.append(getString(R.string.row_drift, getString(fine ? R.string.drift_on : R.string.drift_off)));
+                    s.append(getString(R.string.row_volume, fmtVolume(get(m,"VOLUME",""), get(m,"MUTE",""))));
                 } else {
-                    s.append("\n(重启后自动进入 DAC 或点下方 DAC 模式)");
+                    s.append(getString(R.string.hint_not_dac));
                 }
-                s.append("\n开机自动 DAC: ").append("1".equals(get(m,"AUTOSTART","0")) ? "是" : "否");
+                s.append(getString(R.string.row_autostart,
+                        getString("1".equals(get(m,"AUTOSTART","0")) ? R.string.yes : R.string.no)));
                 status.setText(s.toString());
 
                 int lim = pInt(get(m,"MAXVOLLIMIT","120"));
@@ -231,31 +224,31 @@ public class MainActivity extends Activity {
 
     /* VOLUME is signed Q8.8 dB; MUTE is 0/1. Show e.g. "-27.5 dB" or "静音 (-27.5 dB)". */
     String fmtVolume(String volQ8, String mute){
-        if (volQ8 == null || volQ8.isEmpty()) return "—";
+        if (volQ8 == null || volQ8.isEmpty()) return getString(R.string.value_none);
         double db;
-        try { db = Integer.parseInt(volQ8.trim()) / 256.0; } catch (Exception e){ return "—"; }
+        try { db = Integer.parseInt(volQ8.trim()) / 256.0; } catch (Exception e){ return getString(R.string.value_none); }
         String s = String.format("%.1f dB", db);
-        return "1".equals(mute.trim()) ? ("静音 (" + s + ")") : s;
+        return "1".equals(mute.trim()) ? getString(R.string.volume_muted, s) : s;
     }
 
     void switchToDac(){
         setControlsEnabled(false);
         bg(new Runnable(){ public void run(){
             SuResult r = runSu(SH + "dac");   // no args: brings the gadget up once, macOS drives rate/volume
-            if(r.ok) toast("已进入 DAC 模式，如未识别请拔插 USB");
-            else     toast("进入 DAC 失败: " + r.problem());
+            if(r.ok) toast(getString(R.string.dac_entered));
+            else     toast(getString(R.string.dac_failed, r.problem()));
             ui.post(new Runnable(){ public void run(){ refresh(); }});
         }});
     }
 
     void switchToMtp(){
         new AlertDialog.Builder(this)
-            .setTitle("切换到 MTP / 普通模式")
-            .setMessage("切换到普通 USB 模式需要重启才能生效。是否现在重启？")
-            .setPositiveButton("现在重启", new DialogInterface.OnClickListener(){ public void onClick(DialogInterface d,int w){
-                bg(new Runnable(){ public void run(){ SuResult r = runSu(SH + "mtp"); if(!r.ok){ toast("设置 MTP 失败: " + r.problem()); return; } runSu("svc power reboot || reboot"); }}); }})
-            .setNegativeButton("稍后手动重启", new DialogInterface.OnClickListener(){ public void onClick(DialogInterface d,int w){
-                bg(new Runnable(){ public void run(){ SuResult r = runSu(SH + "mtp"); toast(r.ok ? "已设置为 MTP，重启后生效" : ("设置 MTP 失败: " + r.problem())); ui.post(new Runnable(){ public void run(){ refresh(); }}); }}); }})
+            .setTitle(R.string.mtp_title)
+            .setMessage(R.string.mtp_message)
+            .setPositiveButton(R.string.mtp_restart_now, new DialogInterface.OnClickListener(){ public void onClick(DialogInterface d,int w){
+                bg(new Runnable(){ public void run(){ SuResult r = runSu(SH + "mtp"); if(!r.ok){ toast(getString(R.string.mtp_failed, r.problem())); return; } runSu("svc power reboot || reboot"); }}); }})
+            .setNegativeButton(R.string.mtp_restart_later, new DialogInterface.OnClickListener(){ public void onClick(DialogInterface d,int w){
+                bg(new Runnable(){ public void run(){ SuResult r = runSu(SH + "mtp"); toast(r.ok ? getString(R.string.mtp_set) : getString(R.string.mtp_failed, r.problem())); ui.post(new Runnable(){ public void run(){ refresh(); }}); }}); }})
             .show();
     }
 

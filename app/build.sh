@@ -18,8 +18,12 @@ mkdir -p build/classes
 [ -f "$KEYSTORE" ] || keytool -genkeypair -keystore "$KEYSTORE" \
   -storepass "$KEY_PASS" -keypass "$KEY_PASS" -alias "$KEY_ALIAS" \
   -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ZX500 USB-DAC local build"
-aapt package -f -M AndroidManifest.xml -S res -I "$AJ" -F build/app-res.apk
-javac -classpath "$AJ" -source 17 -target 17 -d build/classes src/com/zx/dac/*.java
+# -J emits R.java for the string resources. The UI text lives in res/values
+# (English) and res/values-zh (Chinese); Android picks by system language.
+mkdir -p build/gen
+aapt package -f -m -M AndroidManifest.xml -S res -I "$AJ" -J build/gen -F build/app-res.apk
+javac -classpath "$AJ" -source 17 -target 17 -d build/classes \
+  src/com/zx/dac/*.java build/gen/com/zx/dac/R.java
 d8 --lib "$AJ" --min-api 28 --output build build/classes/com/zx/dac/*.class
 cp build/app-res.apk build/app-unsigned.apk; (cd build && aapt add app-unsigned.apk classes.dex)
 zipalign -f 4 build/app-unsigned.apk build/app-aligned.apk

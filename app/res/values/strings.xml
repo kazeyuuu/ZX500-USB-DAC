@@ -1,2 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources><string name="app_name">ZX DAC</string></resources>
+<!-- Default (English). Simplified Chinese lives in values-zh/strings.xml and is
+     chosen automatically when the player's system language is Chinese. -->
+<resources>
+    <string name="app_name">ZX DAC</string>
+    <string name="subtitle">hi-res USB-DAC control</string>
+
+    <string name="section_usb_mode">USB mode</string>
+    <string name="section_max_volume">Volume ceiling</string>
+    <string name="btn_dac">DAC mode</string>
+    <string name="btn_mtp">MTP / normal</string>
+    <string name="btn_refresh">Refresh</string>
+
+    <string name="status_reading">Reading status…</string>
+    <string name="status_no_root">Cannot read status.\nGrant this app root in KernelSU.\n\n%1$s</string>
+
+    <string name="row_mode">Mode: %1$s</string>
+    <string name="mode_dac">DAC (USB-DAC)</string>
+    <string name="mode_mtp">MTP / normal</string>
+    <string name="row_rate">\nRate: %1$s</string>
+    <string name="rate_from_host">%1$s (chosen on the computer)</string>
+    <string name="rate_idle">idle (no audio from the computer)</string>
+    <string name="row_bits">\nBit depth: %1$d bit</string>
+    <string name="row_drift">\nDrift correction: %1$s</string>
+    <string name="drift_on">on (fine)</string>
+    <string name="drift_off">off</string>
+    <string name="row_volume">\nVolume: %1$s</string>
+    <string name="hint_not_dac">\n(enters DAC mode at boot, or tap DAC mode below)</string>
+    <string name="row_autostart">\nDAC at boot: %1$s</string>
+    <string name="yes">yes</string>
+    <string name="no">no</string>
+    <string name="volume_muted">muted (%1$s)</string>
+    <string name="value_none">—</string>
+
+    <string name="maxvol_label">Computer can reach %1$d / %2$d (%3$s dB)</string>
+    <string name="maxvol_applied">Ceiling set to %1$d, effective the next time DAC mode starts</string>
+    <string name="maxvol_failed">Could not set it: %1$s</string>
+
+    <string name="dac_entered">In DAC mode. Replug the cable if the computer does not notice.</string>
+    <string name="dac_failed">Could not enter DAC mode: %1$s</string>
+
+    <string name="mtp_title">Switch to MTP / normal</string>
+    <string name="mtp_message">Switching back to ordinary USB takes effect after a restart. Restart now?</string>
+    <string name="mtp_restart_now">Restart now</string>
+    <string name="mtp_restart_later">Restart later</string>
+    <string name="mtp_set">Set to MTP, effective after a restart</string>
+    <string name="mtp_failed">Could not set MTP: %1$s</string>
+
+    <string name="note">Notes:\n• Sample rate, volume and mute are all chosen on the computer (macOS Audio MIDI Setup / Windows Sound settings).\n• 44.1 / 48 / 88.2 / 96 / 176.4 / 192 / 352.8 / 384 kHz at 24 bit, switched without replugging.\n• The player\'s volume is driven by the computer; the slider is the ZX500 hardware volume.\n• The ceiling is how loud a full computer volume slider gets. Default 100; Sony\'s scale ends at 120.\n• A changed ceiling applies the next time DAC mode starts.\n• If the computer does not notice DAC mode, unplug and replug the cable once.\n• Switching to MTP needs a restart.\n• On first use, grant this app root in KernelSU.</string>
+</resources>

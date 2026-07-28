@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 简体中文。默认（英文）见 values/strings.xml，系统语言为中文时自动选用本文件。 -->
+<resources>
+    <string name="subtitle">hi-res USB-DAC 控制</string>
+
+    <string name="section_usb_mode">USB 模式</string>
+    <string name="section_max_volume">最大音量上限</string>
+    <string name="btn_dac">DAC 模式</string>
+    <string name="btn_mtp">MTP / 普通</string>
+    <string name="btn_refresh">刷新状态</string>
+
+    <string name="status_reading">读取状态中…</string>
+    <string name="status_no_root">无法读取状态。\n请在 KernelSU 里给本应用授予 root。\n\n%1$s</string>
+
+    <string name="row_mode">模式: %1$s</string>
+    <string name="mode_dac">DAC (USB-DAC)</string>
+    <string name="mode_mtp">MTP / 普通</string>
+    <string name="row_rate">\n采样率: %1$s</string>
+    <string name="rate_from_host">%1$s（由电脑选择）</string>
+    <string name="rate_idle">待机（电脑无音频流）</string>
+    <string name="row_bits">\n位深: %1$d bit</string>
+    <string name="row_drift">\n漂移校正: %1$s</string>
+    <string name="drift_on">开 (fine)</string>
+    <string name="drift_off">关</string>
+    <string name="row_volume">\n音量: %1$s</string>
+    <string name="hint_not_dac">\n(重启后自动进入 DAC 或点下方 DAC 模式)</string>
+    <string name="row_autostart">\n开机自动 DAC: %1$s</string>
+    <string name="yes">是</string>
+    <string name="no">否</string>
+    <string name="volume_muted">静音 (%1$s)</string>
+    <string name="value_none">—</string>
+
+    <string name="maxvol_label">电脑音量最大可到 %1$d / %2$d（%3$s dB）</string>
+    <string name="maxvol_applied">上限已设为 %1$d，下次进入 DAC 模式生效</string>
+    <string name="maxvol_failed">设置失败：%1$s</string>
+
+    <string name="dac_entered">已进入 DAC 模式，如未识别请拔插 USB</string>
+    <string name="dac_failed">进入 DAC 失败: %1$s</string>
+
+    <string name="mtp_title">切换到 MTP / 普通模式</string>
+    <string name="mtp_message">切换到普通 USB 模式需要重启才能生效。是否现在重启？</string>
+    <string name="mtp_restart_now">现在重启</string>
+    <string name="mtp_restart_later">稍后手动重启</string>
+    <string name="mtp_set">已设置为 MTP，重启后生效</string>
+    <string name="mtp_failed">设置 MTP 失败: %1$s</string>
+
+    <string name="note">说明：\n• 采样率、音量、静音都在电脑系统中选择（macOS Audio MIDI Setup / Windows 声音设置）。\n• 支持 44.1 / 48 / 88.2 / 96 / 176.4 / 192 / 352.8 / 384 kHz，24 bit，切换无需拔插。\n• 本机音量已交给电脑控制；音量条即 ZX500 硬件音量。\n• 上限决定电脑音量条拉满时的响度，默认 100（Sony 满刻度为 120）。\n• 修改上限后需重新进入 DAC 模式才生效。\n• 进入 DAC 后若电脑未识别，拔插一次 USB 线。\n• 切到 MTP 需重启生效。\n• 首次使用请在 KernelSU 里给本应用授予 root。</string>
+</resources>
