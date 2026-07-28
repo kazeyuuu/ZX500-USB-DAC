@@ -4,6 +4,9 @@
 *.img
 !blank_vbmeta.img
 
+# The KernelSU manager is downloaded during installation, not shipped.
+KernelSU_*.apk
+
 # APK signing material and build output.
 *.idsig
 app/*.keystore
@@ -12,4 +15,5 @@ app/out/
 
 # Local dependency/build directories.
 bridge/.build/
+kernel/out/
 __pycache__/
