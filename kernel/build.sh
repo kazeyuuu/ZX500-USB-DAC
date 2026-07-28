@@ -10,14 +10,42 @@ ARCH="${ARCH:-arm64}"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 CC_BIN="${KERNEL_CC:-${CROSS_COMPILE}gcc}"
 
-if git -C "$KERNEL_SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
-  : # release patch already applied
+# Resolve both paths before the build starts: it runs from a different working
+# directory (see BUILD_CWD below), so a relative argument would be interpreted
+# against that directory instead of the caller's and `make -C` would fail.
+KERNEL_SRC="$(cd "$KERNEL_SRC" 2>/dev/null && pwd)" ||
+  { echo "ERROR: kernel source directory not found: $1" >&2; exit 1; }
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+
+# `git apply` run from a subdirectory of a repository silently ignores patch
+# paths that fall outside that subdirectory, and still exits 0. KERNEL_SRC is
+# kernel_imx/ inside the vendor repo and the patch paths are kernel-relative, so
+# applying from there dropped the entire patch while reporting success -- and
+# made both --check and --reverse --check pass vacuously. Apply from the repo
+# root with an explicit prefix instead.
+REPO="$(git -C "$KERNEL_SRC" rev-parse --show-toplevel)"
+if [ "$REPO" = "$KERNEL_SRC" ]; then
+  git_apply() { git -C "$KERNEL_SRC" apply "$@"; }
 else
-  git -C "$KERNEL_SRC" apply --check "$PATCH"
-  git -C "$KERNEL_SRC" apply "$PATCH"
+  git_apply() { git -C "$REPO" apply --directory="${KERNEL_SRC#"$REPO"/}" "$@"; }
 fi
 
-mkdir -p "$OUT_DIR"
+if git_apply --reverse --check "$PATCH" 2>/dev/null; then
+  : # release patch already applied
+else
+  git_apply --check "$PATCH"
+  git_apply "$PATCH"
+fi
+
+# The failure above was invisible because nothing checked the result. Assert on
+# content: c_volume is a configfs attribute only this patch adds, and its absence
+# is exactly what a silently skipped patch looks like.
+if ! grep -q c_volume "$KERNEL_SRC/drivers/usb/gadget/function/f_uac2.c"; then
+  echo "ERROR: release patch is not present in $KERNEL_SRC after applying it" >&2
+  exit 1
+fi
+
 cp "$CONFIG" "$OUT_DIR/.config"
 
 # The vendor Hantro Makefile expands $(PWD) into an include path without quoting.
