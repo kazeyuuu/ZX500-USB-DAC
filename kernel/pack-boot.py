@@ -20,6 +20,14 @@ kernel_offset = page_size
 if len(image) > slot_size:
     raise SystemExit(f"kernel Image is {len(image)} bytes; slot is {slot_size}")
 
+# CRITICAL: kernel_size in the header is deliberately left at Sony's original
+# value and the new Image is zero-padded to fill the whole slot. The bootloader
+# derives the ramdisk offset from page-round(kernel_size), and Sony's ramdisk
+# physically sits at the offset computed from the ORIGINAL size. Writing the
+# real (smaller) kernel size here would move that computed offset and the device
+# would no longer boot. Trailing zeros in the kernel region are harmless: an
+# arm64 Image self-describes its real size. vbmeta, footer and second_addr are
+# untouched, so the image stays byte-identical to Sony's outside this slot.
 stock[kernel_offset:kernel_offset + slot_size] = image + bytes(slot_size - len(image))
 open(output_path, "wb").write(stock)
 print(f"wrote {output_path}: kernel={len(image)} slot={slot_size} total={len(stock)}")

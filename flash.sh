@@ -43,8 +43,24 @@ until fastboot devices | grep -q .; do sleep 1; done
 count=$(fastboot devices | grep -c .)
 [ "$count" -eq 1 ] || { echo "refusing: found $count fastboot devices" >&2; exit 1; }
 fastboot devices
+
+# This is an A/B device and this flasher writes boot_a. Writing the inactive
+# slot changes nothing observable: the player boots the stock kernel exactly as
+# before, which is the hardest possible failure to diagnose. Refuse only on a
+# definite answer of "not a" -- a bootloader that does not implement the
+# variable at all still gets to flash, after a warning and the prompt below.
+SLOT=$(fastboot getvar current-slot 2>&1 | tr -d '\r' |
+       awk -F': *' '/^current-slot:/{print $2; exit}')
+case "$SLOT" in
+  a) TARGET_NOTE="boot_a (the active slot)";;
+  '') TARGET_NOTE="boot_a (WARNING: bootloader did not report current-slot)";;
+  *)  echo "refusing: active slot is '$SLOT'; this flasher writes boot_a." >&2
+      echo "Run 'fastboot set_active a', reboot to the bootloader, then retry." >&2
+      exit 1;;
+esac
+
 echo
-echo "About to write '$IMG' to boot_a only. No wipe; vbmeta is untouched."
+echo "About to write '$IMG' to $TARGET_NOTE. No wipe; vbmeta is untouched."
 read -r -p "Type 'flash' to proceed: " answer
 [ "$answer" = flash ] || { echo "aborted"; exit 1; }
 
